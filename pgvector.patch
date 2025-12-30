@@ -1,0 +1,1174 @@
+diff --git a/Makefile b/Makefile
+index 7a4b88c..212bbe9 100644
+--- a/Makefile
++++ b/Makefile
+@@ -4,13 +4,19 @@ EXTVERSION = 0.8.0
+ MODULE_big = vector
+ DATA = $(wildcard sql/*--*--*.sql)
+ DATA_built = sql/$(EXTENSION)--$(EXTVERSION).sql
+-OBJS = src/bitutils.o src/bitvec.o src/halfutils.o src/halfvec.o src/hnsw.o src/hnswbuild.o src/hnswinsert.o src/hnswscan.o src/hnswutils.o src/hnswvacuum.o src/ivfbuild.o src/ivfflat.o src/ivfinsert.o src/ivfkmeans.o src/ivfscan.o src/ivfutils.o src/ivfvacuum.o src/sparsevec.o src/vector.o
++OBJS = src/bitutils.o src/bitvec.o src/halfutils.o src/halfvec.o src/hnsw.o src/hnswbuild.o src/hnswinsert.o src/hnswscan.o src/hnswutils.o src/hnswvacuum.o src/ivfbuild.o src/ivfflat.o src/ivfinsert.o src/ivfkmeans.o src/ivfscan.o src/ivfutils.o src/ivfvacuum.o src/sparsevec.o src/vector.o src/topkache.o
+ HEADERS = src/halfvec.h src/sparsevec.h src/vector.h
+ 
++# Include the TopKache
++HEADERS += ../../../inc/ResultCache2CWrapper.h src/topkache.h
++
+ TESTS = $(wildcard test/sql/*.sql)
+ REGRESS = $(patsubst test/sql/%.sql,%,$(TESTS))
+ REGRESS_OPTS = --inputdir=test --load-extension=$(EXTENSION)
+ 
++# TopKache lib
++SHLIB_LINK += ../../../build/lib/libtopkache.a -lpthread -lfaiss -lboost_program_options -lstdc++
++
+ # To compile for portability, run: make OPTFLAGS=""
+ OPTFLAGS = -march=native
+ 
+diff --git a/make-install.sh b/make-install.sh
+new file mode 100755
+index 0000000..cea55dc
+--- /dev/null
++++ b/make-install.sh
+@@ -0,0 +1,6 @@
++#!/bin/bash
++
++export PG_CONFIG=/usr/local/pgsql/bin/pg_config
++make clean
++make -j
++sudo --preserve-env=PG_CONFIG make install
+\ No newline at end of file
+diff --git a/sql/vector.sql b/sql/vector.sql
+index 7fc3671..d246755 100644
+--- a/sql/vector.sql
++++ b/sql/vector.sql
+@@ -20,6 +20,12 @@ CREATE FUNCTION vector_recv(internal, oid, integer) RETURNS vector
+ CREATE FUNCTION vector_send(vector) RETURNS bytea
+ 	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+ 
++CREATE FUNCTION topkache_mark_del_trigger() RETURNS trigger
++	AS 'MODULE_PATHNAME', 'topkache_mark_del_trigger' LANGUAGE C VOLATILE PARALLEL UNSAFE;
++
++CREATE FUNCTION topkache_invalidate_random(float) RETURNS void
++	AS 'MODULE_PATHNAME', 'topkache_invalidate_random' LANGUAGE C VOLATILE PARALLEL UNSAFE;
++
+ CREATE TYPE vector (
+ 	INPUT     = vector_in,
+ 	OUTPUT    = vector_out,
+diff --git a/src/hnsw.h b/src/hnsw.h
+index 5102bfb..6ccd981 100644
+--- a/src/hnsw.h
++++ b/src/hnsw.h
+@@ -2,6 +2,7 @@
+ #define HNSW_H
+ 
+ #include "postgres.h"
++#include "access/tableam.h"
+ 
+ #include "access/genam.h"
+ #include "access/parallel.h"
+@@ -378,6 +379,25 @@ typedef struct HnswScanOpaqueData
+ 
+ 	/* Support functions */
+ 	HnswSupport support;
++
++	uint64_t	tk_qvid;
++	char*		tk_qvector;
++	char*		tk_qvector_float;
++
++	// When cached
++	bool		is_cached;
++	int 		cached_num;
++	char*		cached_entry;
++	int			returned;
++
++	// When needs to be cached
++	int 		prepared_num;
++	char* 		prepared_list;
++
++	// Added for mixed, is the tid valid?
++	IndexFetchTableData*	iftd;
++	TupleTableSlot* 		vslot;
++
+ }			HnswScanOpaqueData;
+ 
+ typedef HnswScanOpaqueData * HnswScanOpaque;
+diff --git a/src/hnswscan.c b/src/hnswscan.c
+index 955998a..bfd6598 100644
+--- a/src/hnswscan.c
++++ b/src/hnswscan.c
+@@ -8,6 +8,9 @@
+ #include "utils/float.h"
+ #include "utils/memutils.h"
+ 
++#include "access/tableam.h"
++#include "topkache.h"
++
+ /*
+  * Algorithm 5 from paper
+  */
+@@ -33,15 +36,15 @@ GetScanItems(IndexScanDesc scan, Datum value)
+ 	if (entryPoint == NULL)
+ 		return NIL;
+ 
+-	ep = list_make1(HnswEntryCandidate(base, entryPoint, q, index, support, false));
++	ep = list_make1(HnswEntryCandidate(base, entryPoint, q, index, support, true));
+ 
+ 	for (int lc = entryPoint->level; lc >= 1; lc--)
+ 	{
+-		w = HnswSearchLayer(base, q, ep, 1, lc, index, support, m, false, NULL, NULL, NULL, true, NULL);
++		w = HnswSearchLayer(base, q, ep, 1, lc, index, support, m, true, NULL, NULL, NULL, true, NULL);
+ 		ep = w;
+ 	}
+ 
+-	return HnswSearchLayer(base, q, ep, hnsw_ef_search, 0, index, support, m, false, NULL, &so->v, hnsw_iterative_scan != HNSW_ITERATIVE_SCAN_OFF ? &so->discarded : NULL, true, &so->tuples);
++	return HnswSearchLayer(base, q, ep, hnsw_ef_search, 0, index, support, m, true, NULL, &so->v, hnsw_iterative_scan != HNSW_ITERATIVE_SCAN_OFF ? &so->discarded : NULL, true, &so->tuples);
+ }
+ 
+ /*
+@@ -113,6 +116,8 @@ ShowMemoryUsage(HnswScanOpaque so)
+ }
+ #endif
+ 
++static int calls;
++
+ /*
+  * Prepare for an index scan
+  */
+@@ -123,6 +128,8 @@ hnswbeginscan(Relation index, int nkeys, int norderbys)
+ 	HnswScanOpaque so;
+ 	double		maxMemory;
+ 
++	calls = 0;
++
+ 	scan = RelationGetIndexScan(index, nkeys, norderbys);
+ 
+ 	so = (HnswScanOpaque) palloc(sizeof(HnswScanOpaqueData));
+@@ -146,6 +153,10 @@ hnswbeginscan(Relation index, int nkeys, int norderbys)
+ 
+ 	scan->opaque = so;
+ 
++	// For mixed, initialized.
++	so->iftd = NULL;
++	so->vslot = NULL;
++
+ 	return scan;
+ }
+ 
+@@ -157,6 +168,13 @@ hnswrescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey orderbys, int no
+ {
+ 	HnswScanOpaque so = (HnswScanOpaque) scan->opaque;
+ 
++	so->iftd = table_index_fetch_begin(scan->heapRelation);
++	so->vslot = table_slot_create(scan->heapRelation, NULL);
++
++	// For mixed
++	table_index_fetch_reset(so->iftd);
++	ExecClearTuple(so->vslot);
++
+ 	so->first = true;
+ 	/* v and discarded are allocated in tmpCtx */
+ 	so->v.tids = NULL;
+@@ -181,6 +199,8 @@ hnswgettuple(IndexScanDesc scan, ScanDirection dir)
+ 	HnswScanOpaque so = (HnswScanOpaque) scan->opaque;
+ 	MemoryContext oldCtx = MemoryContextSwitchTo(so->tmpCtx);
+ 
++	calls++;
++
+ 	/*
+ 	 * Index can be used to scan backward, but Postgres doesn't support
+ 	 * backward scan on operators
+@@ -206,16 +226,108 @@ hnswgettuple(IndexScanDesc scan, ScanDirection dir)
+ 		/* Get scan value */
+ 		value = GetScanValue(scan);
+ 
+-		/*
+-		 * Get a shared lock. This allows vacuum to ensure no in-flight scans
+-		 * before marking tuples as deleted.
+-		 */
+-		LockPage(scan->indexRelation, HNSW_SCAN_LOCK, ShareLock);
++		// Extract raw query vector
++		Vector* qvec = DatumGetVector(scan->orderByData->sk_argument);
++
++		char* tk_qvec_buffer 		= (char*)MemoryContextAlloc(so->tmpCtx, sizeof(float) * topkache->parameter.vector_dim);
++		float* query_vector_data 	= (qvec->x);
++
++		memcpy(tk_qvec_buffer, query_vector_data, sizeof(float) * topkache->parameter.vector_dim);
++
++		so->tk_qvid = default_hash(
++			query_vector_data,
++			VARSIZE_ANY_EXHDR(qvec) - 4
++		);
++
++		topkache_vector_t* tk_qvec = create_vector_2_c_wrapper(
++			so->tk_qvid,
++			topkache->parameter.vector_data_size,
++			tk_qvec_buffer,
++			0, // aux_data_1
++			0, // aux_data_2
++			0
++		);
++		so->tk_qvector = tk_qvec;
++		
++		topkache_float_vector_t* tk_qvec_float = create_float_vector_2_c_wrapper(
++			tk_qvec,
++			topkache->parameter.vector_dim,
++			topkache->parameter.vector_data_size,
++			conversion_function_local
++		);
++		so->tk_qvector_float = tk_qvec_float;
++
++		// 
++		// We search for the cache
++		bool similar_entry 	= false;
++		bool is_invalid 	= false;
++
++		topkache_centry_t* found_entry = sim_search_c_wrapper(
++			topkache,
++			tk_qvec_float,
++			&similar_entry,
++			&is_invalid,
++			distance_function_local
++		);
++
++		if (found_entry != NULL && !is_invalid)
++		{
++			so->is_cached 	= true;
++			so->returned 	= 0;
++
++			so->cached_entry = found_entry;
++			so->cached_num = topkache->parameter.vector_intopk;
++
++			// If the sim-hit case, we need to link the entry
++			// if (similar_entry)
++			// {
++			// 	// Link the entry
++			// 	// The vector ID of the found entry?
++			// 	uint64_t found_id = get_vid_entry_2_c_wrapper(found_entry);
++
++			// 	// Generate new cache entry
++			// 	char* new_cache_entry = make_cache_entry_c_wrapper(
++			// 		topkache,
++			// 		so->tk_qvector,
++			// 		topkache->parameter.vector_list_size,
++			// 		NULL
++			// 	);
++
++			// 	// Link the new cache entry to the found entry
++			// 	bool linked = link_cache_entry_c_wrapper(
++			// 		topkache,
++			// 		new_cache_entry,
++			// 		found_id
++			// 	);
++			// }
++		}
++		else
++		{
++			so->is_cached 	= false;
++		}
++
++		if (!so->is_cached)
++		{
++			/*
++			* Get a shared lock. This allows vacuum to ensure no in-flight scans
++			* before marking tuples as deleted.
++			*/
++			LockPage(scan->indexRelation, HNSW_SCAN_LOCK, ShareLock);
+ 
+-		so->w = GetScanItems(scan, value);
++			so->w = GetScanItems(scan, value);
+ 
+-		/* Release shared lock */
+-		UnlockPage(scan->indexRelation, HNSW_SCAN_LOCK, ShareLock);
++			/* Release shared lock */
++			UnlockPage(scan->indexRelation, HNSW_SCAN_LOCK, ShareLock);
++
++			so->prepared_num = 0;
++			so->prepared_list = (char*)MemoryContextAlloc(so->tmpCtx, 
++				sizeof(struct TopKacheResult) * topkache->parameter.vector_list_size);
++			so->returned = 0;
++		}
++		else
++		{
++			so->w = NIL;
++		}
+ 
+ 		so->first = false;
+ 
+@@ -224,6 +336,36 @@ hnswgettuple(IndexScanDesc scan, ScanDirection dir)
+ #endif
+ 	}
+ 
++	// 
++	// Cache hit, and we have results to return
++	if (so->is_cached && so->returned < so->cached_num)
++	{
++		char* vector_2_wrapper = get_result_c_wrapper(
++			so->cached_entry,
++			so->returned);
++
++		so->returned++;
++		struct TopKacheResult* result_slot = get_data_vector_2_c_wrapper(vector_2_wrapper);
++
++		scan->xs_heaptid = result_slot->tid;
++		scan->xs_recheck = false;
++		scan->xs_recheckorderby = false;
++
++		MemoryContextSwitchTo(oldCtx);
++
++		return true;
++	}
++
++	// 
++	// Cache hit, but no results to return
++	if (so->is_cached && so->returned >= so->cached_num)
++	{
++		MemoryContextSwitchTo(oldCtx);
++		return false;
++	}
++
++	hnsw_iterative_scan = HNSW_ITERATIVE_SCAN_STRICT;
++
+ 	for (;;)
+ 	{
+ 		char	   *base = NULL;
+@@ -303,11 +445,155 @@ hnswgettuple(IndexScanDesc scan, ScanDirection dir)
+ 			so->previousDistance = sc->distance;
+ 		}
+ 
+-		MemoryContextSwitchTo(oldCtx);
++		// 
++		// We prepare the result slot for the current element
++		bool all_dead 	= false;
++		bool call_again = false;
++
++		ExecClearTuple(so->vslot);
++		bool visible = table_index_fetch_tuple(
++				so->iftd, heaptid, scan->xs_snapshot, so->vslot, &call_again, &all_dead
++			);
++
++		// 
++		// If the tuple is dead, we skip adding to the list
++		if (visible)
++		{
++			Datum vector_datum = HnswGetValue(base, element);
++			Vector* vec = DatumGetVector(vector_datum);
++
++			struct TopKacheResult* result_slot = so->prepared_list;
++
++			result_slot[so->prepared_num].tid = *heaptid;
++			result_slot[so->prepared_num].distance = sc->distance;
++			result_slot[so->prepared_num].vector_id = default_hash(
++				vec->x,
++				VARSIZE_ANY_EXHDR(vec) - 4
++			);
++
++			so->prepared_num++;
++		}
++		else
++		{
++			// Skip filling up the result slot
++		}
+ 
+ 		scan->xs_heaptid = *heaptid;
+ 		scan->xs_recheck = false;
+ 		scan->xs_recheckorderby = false;
++
++		if (so->prepared_num == (topkache->parameter.vector_intopk))
++		{
++			for (int j = 0; j < topkache->parameter.vector_extras; j++)
++			{
++				while (list_length(so->w) == 0)
++				{
++					if (hnsw_iterative_scan == HNSW_ITERATIVE_SCAN_OFF)
++						break;
++
++					if (so->discarded == NULL)
++						break;
++		
++					if (so->tuples >= hnsw_max_scan_tuples || MemoryContextMemAllocated(so->tmpCtx, false) > so->maxMemory)
++					{
++						if (pairingheap_is_empty(so->discarded))
++							break;
++
++						so->w = lappend(so->w, HnswGetSearchCandidate(w_node, pairingheap_remove_first(so->discarded)));
++					}
++					else
++					{
++						LockPage(scan->indexRelation, HNSW_SCAN_LOCK, ShareLock);
++						so->w = ResumeScanItems(scan);
++						UnlockPage(scan->indexRelation, HNSW_SCAN_LOCK, ShareLock);
++					}
++		
++					if (list_length(so->w) == 0)
++						break;
++				}
++
++				if (list_length(so->w) == 0)
++				{
++					break;
++				}
++
++				HnswSearchCandidate *sc2 	= llast(so->w);
++				HnswElement elem2 			= HnswPtrAccess(base, sc2->element);
++
++				if (elem2->heaptidsLength == 0)
++				{
++					so->w = list_delete_last(so->w);
++					if (hnsw_iterative_scan != HNSW_ITERATIVE_SCAN_OFF)
++					{
++						pfree(elem2);
++						pfree(sc2);
++					}
++					j--;
++					continue;
++				}
++				else
++				{
++					ItemPointer extra_tid = &elem2->heaptids[--elem2->heaptidsLength];
++
++					if (sc2->distance < so->previousDistance)
++					{
++						j--;
++						continue;
++					}
++
++					so->previousDistance = sc2->distance;
++
++					Datum vector_datum = HnswGetValue(base, elem2);
++					Vector* vec = DatumGetVector(vector_datum);
++
++					struct TopKacheResult* result_slot = so->prepared_list;
++
++					result_slot[so->prepared_num].tid = *extra_tid;
++					result_slot[so->prepared_num].distance = sc2->distance;
++					result_slot[so->prepared_num].vector_id = default_hash(
++						vec->x,
++						VARSIZE_ANY_EXHDR(vec) - 4
++					);
++					
++					so->prepared_num++;
++
++				}
++			}
++
++			char** vector_ref_list = (char**)MemoryContextAlloc(so->tmpCtx, sizeof(char*) * so->prepared_num);
++			for (int i = 0; i < so->prepared_num; i++)
++			{
++				struct TopKacheResult* result_slot = so->prepared_list;
++
++				uint64_t vector_id = result_slot[i].vector_id;
++				vector_ref_list[i] = create_vector_2_c_wrapper(
++					vector_id,
++					sizeof(struct TopKacheResult),
++					&(result_slot[i]),
++					0,
++					0,
++					result_slot[i].distance
++				);
++
++				set_distance_vector_2_c_wrapper(
++					vector_ref_list[i],
++					result_slot[i].distance
++				);
++
++			}
++
++			char* cache_entry = make_cache_entry_c_wrapper(
++				topkache,
++				so->tk_qvector,
++				so->prepared_num,
++				vector_ref_list
++			);
++
++			insert_cache_entry_c_wrapper(topkache, so->tk_qvid, cache_entry, so->tk_qvector_float);
++		}
++
++
++		MemoryContextSwitchTo(oldCtx);
+ 		return true;
+ 	}
+ 
+@@ -325,6 +611,20 @@ hnswendscan(IndexScanDesc scan)
+ 
+ 	MemoryContextDelete(so->tmpCtx);
+ 
++	// Before ending the scan, consume the old lentries
++	consume_wl_entry_c_wrapper(
++		topkache,
++		distance_function_local,
++		result_conversion_function_local
++	);
++
++	// Debug purpose
++	request_processed++;
++
++	// Clear them for mixed
++	table_index_fetch_end(so->iftd);
++	ExecDropSingleTupleTableSlot(so->vslot);
++
+ 	pfree(so);
+ 	scan->opaque = NULL;
+ }
+diff --git a/src/ivfflat.h b/src/ivfflat.h
+index c296b66..4296166 100644
+--- a/src/ivfflat.h
++++ b/src/ivfflat.h
+@@ -2,6 +2,7 @@
+ #define IVFFLAT_H
+ 
+ #include "postgres.h"
++#include "access/tableam.h"
+ 
+ #include "access/genam.h"
+ #include "access/generic_xlog.h"
+@@ -280,6 +281,25 @@ typedef struct IvfflatScanOpaqueData
+ 	BlockNumber *listPages;
+ 	int			listIndex;
+ 	IvfflatScanList *lists;
++
++	// Cache-related (query)
++	uint64_t	tk_qvid;
++	char*		tk_qvector;
++	char*		tk_qvector_float;
++
++	bool		is_cached;
++	int 		cached_num;
++	char* 		cached_entry;
++	int			returned;
++	
++	// Cache-related (cache-inserts)
++	int 		prepared_num;
++	char* 		prepared_list;
++
++	// Added for mixed, is the tid valid?
++	IndexFetchTableData*	iftd;
++	TupleTableSlot* 		valslot;
++
+ }			IvfflatScanOpaqueData;
+ 
+ typedef IvfflatScanOpaqueData * IvfflatScanOpaque;
+diff --git a/src/ivfscan.c b/src/ivfscan.c
+index 6cc5d2e..3ad449d 100644
+--- a/src/ivfscan.c
++++ b/src/ivfscan.c
+@@ -12,6 +12,9 @@
+ #include "storage/bufmgr.h"
+ #include "utils/memutils.h"
+ 
++#include "topkache.h"
++
++
+ #define GetScanList(ptr) pairingheap_container(IvfflatScanList, ph_node, ptr)
+ #define GetScanListConst(ptr) pairingheap_const_container(IvfflatScanList, ph_node, ptr)
+ 
+@@ -157,6 +160,18 @@ GetScanItems(IndexScanDesc scan, Datum value)
+ 				slot->tts_isnull[0] = false;
+ 				slot->tts_values[1] = PointerGetDatum(&itup->t_tid);
+ 				slot->tts_isnull[1] = false;
++
++				// Record the raw vector
++				char* vector = DatumGetPointer(datum);
++				size_t vector_size = VARSIZE_ANY(vector);
++
++				char* vector_copy = (char*)MemoryContextAlloc(so->tmpCtx, vector_size);
++				
++				memcpy(vector_copy, DatumGetPointer(datum), vector_size);
++
++				slot->tts_values[2] = PointerGetDatum(vector_copy);
++				slot->tts_isnull[2] = false;
++
+ 				ExecStoreVirtualTuple(slot);
+ 
+ 				tuplesort_puttupleslot(so->sortstate, slot);
+@@ -284,10 +299,17 @@ ivfflatbeginscan(Relation index, int nkeys, int norderbys)
+ 	oldCtx = MemoryContextSwitchTo(so->tmpCtx);
+ 
+ 	/* Create tuple description for sorting */
+-	so->tupdesc = CreateTemplateTupleDesc(2);
++	so->tupdesc = CreateTemplateTupleDesc(3);
+ 	TupleDescInitEntry(so->tupdesc, (AttrNumber) 1, "distance", FLOAT8OID, -1, 0);
+ 	TupleDescInitEntry(so->tupdesc, (AttrNumber) 2, "heaptid", TIDOID, -1, 0);
+ 
++	// Add to contain additional value
++	TupleDesc vector_tuple_desc = RelationGetDescr(index);
++	TupleDescInitEntry(so->tupdesc, (AttrNumber) 3, "vector", TupleDescAttr(vector_tuple_desc, 0)->atttypid, -1, 0);
++
++	so->iftd 	= NULL;
++	so->valslot = NULL;
++
+ 	/* Prep sort */
+ 	so->sortstate = InitScanSortState(so->tupdesc);
+ 
+@@ -331,6 +353,13 @@ ivfflatrescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey orderbys, int
+ 
+ 	if (orderbys && scan->numberOfOrderBys > 0)
+ 		memmove(scan->orderByData, orderbys, scan->numberOfOrderBys * sizeof(ScanKeyData));
++
++	so->iftd = table_index_fetch_begin(scan->heapRelation);
++	so->valslot = table_slot_create(scan->heapRelation, NULL);
++
++	// For mixed
++	table_index_fetch_reset(so->iftd);
++	ExecClearTuple(so->valslot);
+ }
+ 
+ /*
+@@ -353,23 +382,137 @@ ivfflatgettuple(IndexScanDesc scan, ScanDirection dir)
+ 	{
+ 		Datum		value;
+ 
+-		/* Count index scan for stats */
+-		pgstat_count_index_scan(scan->indexRelation);
+-
+-		/* Safety check */
+-		if (scan->orderByData == NULL)
+-			elog(ERROR, "cannot scan ivfflat index without order");
++		// Raw vector query
++		Vector* qvec = DatumGetVector(scan->orderByData->sk_argument);
++
++		char* tk_qvec_buffer 		= (char*)MemoryContextAlloc(so->tmpCtx, sizeof(float) * topkache->parameter.vector_dim);
++		float* query_vector_data 	= (qvec->x);
++
++		memcpy(tk_qvec_buffer, query_vector_data, sizeof(float) * topkache->parameter.vector_dim);
++		so->tk_qvid = default_hash(
++			query_vector_data,
++			topkache->parameter.vector_data_size
++		);
++
++		topkache_vector_t* tk_qvec = create_vector_2_c_wrapper(
++			so->tk_qvid,
++			topkache->parameter.vector_data_size,
++			tk_qvec_buffer,
++			0, 0, 0
++		);
++		so->tk_qvector = tk_qvec;
++
++		topkache_float_vector_t* tk_qvec_float = create_float_vector_2_c_wrapper(
++			tk_qvec,
++			topkache->parameter.vector_dim,
++			topkache->parameter.vector_data_size,
++			conversion_function_local
++		);
++		so->tk_qvector_float = tk_qvec_float;
++
++		Assert(new_vec_size == (VARSIZE_ANY_EXHDR(new_vec) - 4));
++
++		// 
++		// We search for the cache
++		bool similar_entry 	= false;
++		bool is_invalid 	= false;
++
++		topkache_centry_t* found_entry = sim_search_c_wrapper(
++			topkache,
++			tk_qvec_float,
++			&similar_entry,
++			&is_invalid,
++			distance_function_local
++		);
++
++		if (found_entry != NULL && !is_invalid)
++		{
++			so->is_cached 	= true;
++			so->returned 	= 0;
++
++			so->cached_entry = found_entry;
++			so->cached_num = topkache->parameter.vector_intopk;
++
++			// If the sim-hit case, we need to link the entry
++			// if (similar_entry)
++			// {
++			// 	// Link the entry
++			// 	// The vector ID of the found entry?
++			// 	uint64_t found_id = get_vid_entry_2_c_wrapper(found_entry);
++
++			// 	// Generate new cache entry
++			// 	char* new_cache_entry = make_cache_entry_c_wrapper(
++			// 		topkache,
++			// 		so->tk_qvector,
++			// 		topkache->parameter.vector_list_size,
++			// 		NULL
++			// 	);
++
++			// 	// Link the new cache entry to the found entry
++			// 	bool linked = link_cache_entry_c_wrapper(
++			// 		topkache,
++			// 		new_cache_entry,
++			// 		found_id
++			// 	);
++			// }
++		}
++		else
++		{
++			so->is_cached 	= false;
+ 
+-		/* Requires MVCC-compliant snapshot as not able to pin during sorting */
+-		/* https://www.postgresql.org/docs/current/index-locking.html */
+-		if (!IsMVCCSnapshot(scan->xs_snapshot))
+-			elog(ERROR, "non-MVCC snapshots are not supported with ivfflat");
++			so->prepared_num = 0;
++			so->prepared_list = (char*)MemoryContextAlloc(so->tmpCtx, sizeof(struct TopKacheResult) * topkache->parameter.vector_list_size);
++			so->returned = 0;
++		}
+ 
+-		value = GetScanValue(scan);
+-		IvfflatBench("GetScanLists", GetScanLists(scan, value));
+-		IvfflatBench("GetScanItems", GetScanItems(scan, value));
+ 		so->first = false;
+-		so->value = value;
++
++		if (so->is_cached)
++			;
++		else
++		{
++			/* Count index scan for stats */
++			pgstat_count_index_scan(scan->indexRelation);
++
++			/* Safety check */
++			if (scan->orderByData == NULL)
++				elog(ERROR, "cannot scan ivfflat index without order");
++
++			/* Requires MVCC-compliant snapshot as not able to pin during sorting */
++			/* https://www.postgresql.org/docs/current/index-locking.html */
++			if (!IsMVCCSnapshot(scan->xs_snapshot))
++				elog(ERROR, "non-MVCC snapshots are not supported with ivfflat");
++
++			value = GetScanValue(scan);
++			IvfflatBench("GetScanLists", GetScanLists(scan, value));
++			IvfflatBench("GetScanItems", GetScanItems(scan, value));
++			so->value = value;
++		}
++	}
++
++	// 
++	// Case when cached
++	if (so->is_cached)
++	{
++		if (so->returned < so->cached_num)
++		{
++			char* vector_2_wrapper = get_result_c_wrapper(
++				so->cached_entry,
++				so->returned);
++
++			so->returned++;
++			struct TopKacheResult* result_slot = get_data_vector_2_c_wrapper(vector_2_wrapper);
++
++			scan->xs_heaptid = result_slot->tid;
++			scan->xs_recheck = false;
++			scan->xs_recheckorderby = false;
++
++			return true;
++		}
++		else
++		{
++			return false;
++		}
+ 	}
+ 
+ 	while (!tuplesort_gettupleslot(so->sortstate, true, false, so->mslot, NULL))
+@@ -382,6 +525,111 @@ ivfflatgettuple(IndexScanDesc scan, ScanDirection dir)
+ 
+ 	heaptid = (ItemPointer) DatumGetPointer(slot_getattr(so->mslot, 2, &isnull));
+ 
++	// 
++	// 
++	// Check if the tid is valid or not.
++	bool all_dead 	= false;
++	bool call_again = false;
++
++	ExecClearTuple(so->vslot);
++	bool visible = table_index_fetch_tuple(
++			so->iftd, heaptid, scan->xs_snapshot, so->valslot, &call_again, &all_dead
++		);
++
++	// Case when not cached
++	struct TopKacheResult* result_slot = so->prepared_list;
++	Datum dist_datum = slot_getattr(so->mslot, 1, &isnull);
++
++	Vector* vec = NULL;
++
++	if (visible)
++	{
++		result_slot[so->prepared_num].tid = *heaptid;
++		result_slot[so->prepared_num].distance = DatumGetFloat8(dist_datum);
++
++		vec = DatumGetVector(slot_getattr(so->mslot, 3, &isnull));
++		result_slot[so->prepared_num].vector_id = default_hash(
++			vec->x,
++			VARSIZE_ANY_EXHDR(vec) - 4
++		);
++
++		so->prepared_num++;
++	}
++	else
++	{
++		// In case the tuple is dead, we do not fill the prepared_list
++
++	}
++
++	// 
++	// Now, since we have all the intopk, we need to fetch more
++	if (so->prepared_num == (topkache->parameter.vector_intopk))
++	{
++		// Fetch more (extras)
++		int extras = topkache->parameter.vector_extras;
++
++		for (int j = 0; j < extras; j++)
++		{
++			bool maxed = false;
++			while (!tuplesort_gettupleslot(so->sortstate, true, false, so->mslot, NULL))
++			{
++				if (so->listIndex == so->maxProbes)
++				{
++					maxed = true;
++					break;
++				}
++
++				GetScanItems(scan, so->value);
++			}
++
++			if (maxed) break;
++
++			result_slot[so->prepared_num].tid = *((ItemPointer)DatumGetPointer(slot_getattr(so->mslot, 2, &isnull)));
++
++			dist_datum = slot_getattr(so->mslot, 1, &isnull);
++			result_slot[so->prepared_num].distance = DatumGetFloat8(dist_datum);
++
++			vec = DatumGetVector(slot_getattr(so->mslot, 3, &isnull));
++
++			result_slot[so->prepared_num].vector_id = default_hash(
++				vec->x,
++				VARSIZE_ANY_EXHDR(vec) - 4
++			);
++
++			so->prepared_num++;
++		}
++
++		char** vector_ref_list = (char**)MemoryContextAlloc(so->tmpCtx, sizeof(char*) * so->prepared_num);
++		for (int i = 0; i < so->prepared_num; i++)
++		{
++			struct TopKacheResult* result_slot = so->prepared_list;
++			uint64_t vector_id = result_slot[i].vector_id;
++
++			vector_ref_list[i] = create_vector_2_c_wrapper(
++				vector_id,
++				sizeof(struct TopKacheResult),
++				&(result_slot[i]),
++				0, // set aux_data_1
++				0,
++				result_slot[i].distance
++			);
++
++			set_distance_vector_2_c_wrapper(
++				vector_ref_list[i],
++				result_slot[i].distance
++			);
++		}
++
++		char* cache_entry = make_cache_entry_c_wrapper(
++			topkache,
++			so->tk_qvector,
++			so->prepared_num,
++			vector_ref_list
++		);
++
++		insert_cache_entry_c_wrapper(topkache, so->tk_qvid, cache_entry, so->tk_qvector_float);
++	}
++
+ 	scan->xs_heaptid = *heaptid;
+ 	scan->xs_recheck = false;
+ 	scan->xs_recheckorderby = false;
+@@ -396,6 +644,15 @@ ivfflatendscan(IndexScanDesc scan)
+ {
+ 	IvfflatScanOpaque so = (IvfflatScanOpaque) scan->opaque;
+ 
++	// Before ending the scan, consume the old lentries
++	consume_wl_entry_c_wrapper(
++		topkache,
++		distance_function_local,
++		result_conversion_function_local
++	);
++
++	request_processed++;
++
+ 	/* Free any temporary files */
+ 	tuplesort_end(so->sortstate);
+ 
+diff --git a/src/topkache.c b/src/topkache.c
+new file mode 100644
+index 0000000..5a82d7c
+--- /dev/null
++++ b/src/topkache.c
+@@ -0,0 +1,69 @@
++#include "topkache.h"
++
++float
++distance_function_local(
++    uint8_t* a,
++    uint8_t* b,
++    size_t dim)
++{
++	float distance = 0;
++
++	uintptr_t raw_a = (uintptr_t)a + 0;
++	uintptr_t raw_b = (uintptr_t)b + 0;
++
++	distance = l2_dist_c_wrapper(raw_a, raw_b, dim);
++
++	return distance;
++}
++
++bool
++conversion_function_local(
++    void* src,
++    size_t src_size,
++    size_t dim,
++    void* dst,
++    uint8_t* aux) 
++{
++
++    uintptr_t src_array = (uintptr_t)src;
++    uintptr_t dst_array = (uintptr_t)dst;
++
++	memcpy(dst_array, src_array, dim * sizeof(float));
++
++    return true;
++}
++
++void
++result_conversion_function_local(
++	uint64_t vector_id,
++	uint8_t* vector_data,
++	size_t vector_data_size,
++	uint64_t aux_1, // distance
++	uint64_t aux_2 	// tid
++)
++{
++	uintptr_t raw_src = (uintptr_t)vector_data + 0;
++
++	struct TopKacheResult result_slot_template;
++
++	// aux_1 is distance, aux_2 is tid
++	memcpy(&(result_slot_template.distance), (void*)&aux_1, sizeof(float));
++	memcpy(&(result_slot_template.tid), (void*)&aux_2, sizeof(ItemPointerData));
++
++	memcpy(raw_src, (void*)&result_slot_template, sizeof(struct TopKacheResult));
++}
++
++void 
++debug_print(const char* msg, ...)
++{
++	va_list args;
++
++	// Append header to the message
++	fprintf(stdout, "[TopKache] %s: ", __func__);
++
++	va_start(args, msg);
++	vfprintf(stdout, msg, args);
++	va_end(args);
++
++	fflush(stdout);
++}
+diff --git a/src/topkache.h b/src/topkache.h
+new file mode 100644
+index 0000000..e7837d4
+--- /dev/null
++++ b/src/topkache.h
+@@ -0,0 +1,53 @@
++// TopKache integration
++#include <assert.h>
++#include <string.h>
++#include <stdbool.h>
++
++#include <stdarg.h>
++#include <stdio.h>
++#include <stdint.h>
++
++#include "postgres.h"
++#include "storage/itemptr.h"
++#include "../../../../inc/ResultCache2CWrapper.h"
++
++typedef char 	topkache_vector_t;
++typedef char 	topkache_float_vector_t;
++typedef char 	topkache_centry_t;
++typedef char 	topkache_result_data_t;
++
++extern int request_processed;
++extern result_cache_2_c_wrapper_t* topkache;
++
++struct TopKacheResult
++{
++    uint64_t vector_id;          // The vector ID
++    ItemPointerData tid;         // The TID of the vector
++    float distance;              // The distance of the vector
++};
++
++float
++distance_function_local(
++    uint8_t* a,
++    uint8_t* b,
++    size_t dim);
++
++bool
++conversion_function_local(
++    void* src,
++    size_t src_size,
++    size_t dim,
++    void* dst,
++    uint8_t* aux);
++
++void
++result_conversion_function_local(
++	uint64_t vector_id,
++	uint8_t* vector_data,
++	size_t vector_data_size,
++	uint64_t aux_1, // distance
++	uint64_t aux_2 	// tid
++);
++
++void 
++debug_print(const char* msg, ...);
+diff --git a/src/vector.c b/src/vector.c
+index a5b2aac..4de95b6 100644
+--- a/src/vector.c
++++ b/src/vector.c
+@@ -37,6 +37,27 @@
+ 
+ PG_MODULE_MAGIC;
+ 
++// TopKache integration
++#include "topkache.h"
++#include "commands/trigger.h"
++
++// TopKache integration
++int request_processed = 0;
++result_cache_2_c_wrapper_t* topkache = NULL;
++
++static
++void export_topkache_stats()
++{
++	if (topkache == NULL)
++	{
++		fprintf(stdout, "[TopKache] TopKache is not initialized.\n");
++		fflush(stdout);
++		return;
++	}
++
++	export_call_c_wrapper(topkache);
++}
++
+ /*
+  * Initialize index options and variables
+  */
+@@ -48,6 +69,49 @@ _PG_init(void)
+ 	HalfvecInit();
+ 	HnswInit();
+ 	IvfflatInit();
++
++	fprintf(stdout, "[TopKache] Initializing TopKache from _PG_init, current pid: %d\n", getpid());
++	fflush(stdout);
++
++	// TopKache integration
++	result_cache_parameter_c_t parameter_info;
++	memset(&parameter_info, 0, sizeof(parameter_info));
++
++	char* topkache_path = getenv("TOPKACHE_CONFIG");
++	if (topkache_path == NULL)
++	{
++		fprintf(stdout, "[TopKache] Environment variable TOPKACHE_CONFIG not set.\n");
++		fflush(stdout);
++
++		exit(-1);
++	}
++
++	fprintf(stdout, "[TopKache] %s: TopKache configuration path.\n", topkache_path);
++	fflush(stdout);
++
++	// Import TopKache parameters
++	import_topkache_parameter(topkache_path, &parameter_info);
++
++	topkache = create_result_cache_2_c_wrapper(parameter_info);
++	if (topkache == NULL)
++	{
++		fprintf(stdout, "[TopKache] Failed to create TopKache\n");
++		fflush(stdout);
++
++		exit(-1);
++	}
++
++	set_distance_function_c_wrapper(
++		topkache,
++		l2_dist_c_wrapper
++	);
++
++	fprintf(stdout, "[TopKache] TopKache initialized successfully\n");
++	fprintf(stdout, "[TopKache] TopKache instance: %p\n", topkache);
++	fflush(stdout);
++
++	// Register export function
++	on_proc_exit(export_topkache_stats, 0);
+ }
+ 
+ /*
+@@ -1300,3 +1364,63 @@ sparsevec_to_vector(PG_FUNCTION_ARGS)
+ 
+ 	PG_RETURN_POINTER(result);
+ }
++
++FUNCTION_PREFIX PG_FUNCTION_INFO_V1(topkache_mark_del_trigger);
++Datum
++topkache_mark_del_trigger(PG_FUNCTION_ARGS)
++{
++    TriggerData *trigdata;
++    Relation     rel;
++    HeapTuple    tuple;      /* OLD */
++    const char  *colname;
++    AttrNumber   attnum;
++    bool         is_null;
++    Datum        d;
++
++    if (!CALLED_AS_TRIGGER(fcinfo))
++        ereport(ERROR, (errmsg("topkache_mark_del_trigger: not called as trigger")));
++
++    trigdata = (TriggerData *) fcinfo->context;
++
++    if (!TRIGGER_FIRED_FOR_ROW(trigdata->tg_event))
++        ereport(ERROR, (errmsg("topkache_mark_del_trigger: must be a row-level trigger")));
++
++    rel = trigdata->tg_relation;
++    if (rel->rd_rel->relkind != RELKIND_RELATION)
++        ereport(ERROR, (errmsg("topkache_mark_del_trigger: not fired on a table")));
++
++    tuple = trigdata->tg_trigtuple;
++    colname = (trigdata->tg_trigger->tgnargs >= 1) ? trigdata->tg_trigger->tgargs[0] : "embedding";
++    attnum  = get_attnum(RelationGetRelid(rel), colname);
++    if (attnum <= 0)
++        ereport(ERROR, (errmsg("topkache_mark_del_trigger: column \"%s\" not found", colname)));
++    
++		d = heap_getattr(tuple, attnum, RelationGetDescr(rel), &is_null);
++    if (!is_null && topkache)
++    {
++        Vector *vec = (Vector *) PG_DETOAST_DATUM(d);
++        size_t bytes = VARSIZE_ANY_EXHDR(vec) - 4;
++
++        if (bytes > 0)
++        {
++            uint64_t vid = default_hash(vec->x, bytes);
++            mark_deleted_c_wrapper(topkache, vid);
++        }
++
++        if ((Pointer) vec != DatumGetPointer(d))
++            pfree(vec);
++    }
++
++    PG_RETURN_POINTER(trigdata->tg_trigtuple);
++}
++
++FUNCTION_PREFIX PG_FUNCTION_INFO_V1(topkache_invalidate_random);
++Datum
++topkache_invalidate_random(PG_FUNCTION_ARGS)
++{
++	float percent = PG_GETARG_FLOAT8(0);
++	if (topkache)
++		stress_test_invalidate_random_c_wrapper(topkache, percent);
++	
++	PG_RETURN_VOID();
++}
