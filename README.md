@@ -102,6 +102,22 @@ distance        = vector_l2_ops
 
 Set the dataset path in `[dataset]/base`, and the query vectors in `[dataset]/search` (in `.npy` format). The scripts generate a ground-truth trace and save it to `[dataset]/gt_trace` (as a `.pkl` file).
 
+In the script file, you can adjust the pool size. 
+
+```sh
+vector_pool_size=(
+    500000
+)
+```
+
+You can set a fixed fixed threshold. If this value is set to zero, Aker mode is activated. If not, the threshold value is used for approximate hits.
+
+```sh
+fixed_threshold=(
+    0
+)
+```
+
 ## Applications
 
 ### PostgreSQL `pgvector` Extension
