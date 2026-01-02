@@ -1,7 +1,7 @@
 ![aker-logo](aker-logo-1.png)
 
 # Aker
-**Aker**: Per-Query Density-Aware Caching for Vector Search
+**Aker**: Density-Aware Approximate Caching for Vector Search
 
 ## Requirements
 
