@@ -17,7 +17,7 @@
 #include <cstring>
 #include <string>
 
-#include "utils/ak_spin_mutex.hh"
+#include "utils/ak_lock.hh"
 
 namespace aker
 {
@@ -68,7 +68,7 @@ namespace aker
 
         /* Per-vector lock and state.
          */
-        SpinMutex                           vector_lock_;
+        InternalMutex                       vector_lock_;
         vector_state_t                      vector_state_;
 
         /* Distance metadata used by the cache logic.

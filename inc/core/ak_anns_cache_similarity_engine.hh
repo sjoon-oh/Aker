@@ -1,41 +1,42 @@
 #pragma once
 
 #include "ak_approx_filter.hh"
-#include "core/ak_ann_cache2_context.hh"
+#include "core/ak_anns_cache_context.hh"
 
 namespace aker
 {
-    class ANNCache2EntryStore;
+    class ANNSCacheEntryStore;
 
     /**
-     * @brief SimilarityEngine module for ANNCache2.
+     * @brief SimilarityEngine module for ANNSCache.
      *
      * This module implements exact-hit and sim-hit logic and invalid handling.
      */
-    class ANNCache2SimilarityEngine
+    class ANNSCacheSimilarityEngine
     {
     public:
         /**
          * @brief Constructs the module with the shared cache context.
          */
-        ANNCache2SimilarityEngine(ANNCache2Context* context, ANNCache2EntryStore* entry_store) noexcept;
+        ANNSCacheSimilarityEngine(ANNSCacheContext* context, ANNSCacheEntryStore* entry_store) noexcept;
 
         /**
          * @brief Looks up a cache entry by exact id or by approximate similarity.
          */
-        result_cache_entry_t* simGetCEntryLocked(
+        anns_cache_entry_t* getCacheEntryLocked(
             vector_view_t query_vector_data,
             bool& similar_entry,
             bool& is_invalid,
-            distance_function_t distance_function) noexcept;
+            distance_function_t distance_function,
+            const float* query_vector_float) noexcept;
 
         /**
          * @brief Validates an entry by pushing invalid vectors to the tail.
          */
-        bool handleInvalidCEntryLocked(result_cache_entry_t* entry) noexcept;
+        bool validateCacheEntryLocked(anns_cache_entry_t* entry) noexcept;
 
     private:
-        ANNCache2Context*  context_;
-        ANNCache2EntryStore* entry_store_;
+        ANNSCacheContext*  context_;
+        ANNSCacheEntryStore* entry_store_;
     };
 }

@@ -2,39 +2,36 @@
 #include <cstdlib>
 #include <cstring>
 
-#include "core/ak_ann_cache2_entry_store.hh"
+#include "core/ak_anns_cache_entry_store.hh"
 #include "core/ak_cache_vector_copy.hh"
 
 namespace aker
 {
-    ANNCache2EntryStore::ANNCache2EntryStore(ANNCache2Context* context) noexcept
+    ANNSCacheEntryStore::ANNSCacheEntryStore(ANNSCacheContext* context) noexcept
         : context_(context)
     {
         assert(context_ != nullptr);
     }
 
-    result_cache_entry_t*
-    ANNCache2EntryStore::getCEntry(vector_id_t vector_id) noexcept
+    anns_cache_entry_t*
+    ANNSCacheEntryStore::getCacheEntry(vector_id_t vector_id) noexcept
     {
         /* Resolves the entry ID to the root entry.
          * The root entry is defined as the head of the linked chain (prev == nullptr).
          */
-        result_cache_entry_t* entry = nullptr;
+        auto it = context_->lookup_table->map.find(vector_id);
+        if (it == context_->lookup_table->map.end())
+            return nullptr;
 
-        context_->lookup_table->map.visit(
-            vector_id,
-            [&](const auto& pair)
-            {
-                entry = pair.second;
-                while (entry->prev != nullptr)
-                    entry = entry->prev;
-            });
+        anns_cache_entry_t* entry = it->second;
+        while (entry != nullptr && entry->prev != nullptr)
+            entry = entry->prev;
 
         return entry;
     }
 
-    result_cache_entry_t*
-    ANNCache2EntryStore::copyCacheEntry(result_cache_entry_t* entry) noexcept
+    anns_cache_entry_t*
+    ANNSCacheEntryStore::copyCacheEntry(anns_cache_entry_t* entry) noexcept
     {
         /* Creates a deep copy of a cache entry for external consumption.
          * The returned copy owns its query vector and slot VectorSlot objects.
@@ -42,12 +39,12 @@ namespace aker
         if (entry == nullptr)
             return nullptr;
 
-        result_cache_entry_t* new_entry = new result_cache_entry_t();
+        anns_cache_entry_t* new_entry = new anns_cache_entry_t();
 
         const size_t vec_data_size = context_->vector_pool->getPayloadSize();
         new_entry->query_vector = cloneVectorBasic(entry->query_vector, vec_data_size);
 
-        new_entry->entry_kind = RESULT_CACHE_ENTRY_KIND_RETURNED_COPY;
+        new_entry->entry_kind = ANNS_CACHE_ENTRY_KIND_RETURNED_COPY;
         new_entry->entry_status = entry->entry_status;
         new_entry->version = entry->version;
 
@@ -79,12 +76,12 @@ namespace aker
     }
 
     bool
-    ANNCache2EntryStore::tryLockCEntry(result_cache_entry_t* entry) noexcept
+    ANNSCacheEntryStore::tryLockCacheEntry(anns_cache_entry_t* entry) noexcept
     {
         /* CAS-based entry lock using entry_status.
          */
-        result_cache_entry_status_t expected_state = RESULT_CACHE_ENTRY_STATUS_VALID;
-        result_cache_entry_status_t desired_state = RESULT_CACHE_ENTRY_STATUS_INMOD;
+        anns_cache_entry_status_t expected_state = ANNS_CACHE_ENTRY_STATUS_VALID;
+        anns_cache_entry_status_t desired_state = ANNS_CACHE_ENTRY_STATUS_INMOD;
 
         return __atomic_compare_exchange_n(
             &(entry->entry_status),
@@ -96,15 +93,15 @@ namespace aker
     }
 
     bool
-    ANNCache2EntryStore::unlockCEntry(result_cache_entry_t* entry) noexcept
+    ANNSCacheEntryStore::unlockCacheEntry(anns_cache_entry_t* entry) noexcept
     {
         /* CAS-based entry unlock.
          */
         if (entry == nullptr)
             return false;
 
-        result_cache_entry_status_t expected_state = RESULT_CACHE_ENTRY_STATUS_INMOD;
-        result_cache_entry_status_t desired_state = RESULT_CACHE_ENTRY_STATUS_VALID;
+        anns_cache_entry_status_t expected_state = ANNS_CACHE_ENTRY_STATUS_INMOD;
+        anns_cache_entry_status_t desired_state = ANNS_CACHE_ENTRY_STATUS_VALID;
 
         return __atomic_compare_exchange_n(
             &(entry->entry_status),
@@ -116,24 +113,19 @@ namespace aker
     }
 
     bool
-    ANNCache2EntryStore::linkCEntryLocked(result_cache_entry_t* allocated_entry, vector_id_t found_id) noexcept
+    ANNSCacheEntryStore::linkCacheEntryLocked(anns_cache_entry_t* allocated_entry, vector_id_t found_id) noexcept
     {
         /* Links an allocated dummy entry to an existing root entry.
          * This preserves the original semantics.
          */
-        result_cache_entry_t* root_entry = getCEntry(found_id);
+        anns_cache_entry_t* root_entry = getCacheEntry(found_id);
         if (root_entry == nullptr)
             return false;
 
-        int inserted = context_->lookup_table->map.try_emplace_or_visit(
-            allocated_entry->query_vector->getVectorId(),
-            allocated_entry,
-            [&](const auto& pair)
-            {
-                (void)pair;
-            });
-
-        if (inserted == 0)
+        const vector_id_t new_key = allocated_entry->query_vector->getVectorId();
+        const auto emplace_result = context_->lookup_table->map.emplace(new_key, allocated_entry);
+        const bool inserted = emplace_result.second;
+        if (!inserted)
             return false;
 
         allocated_entry->prev = root_entry;

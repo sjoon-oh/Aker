@@ -2,22 +2,22 @@
 
 #include <string>
 
-#include "core/ak_ann_cache2_context.hh"
+#include "core/ak_anns_cache_context.hh"
 
 namespace aker
 {
     /**
-     * @brief Telemetry module for ANNCache2.
+     * @brief Telemetry module for ANNSCache.
      *
      * This module builds a concise cache summary and coordinates trace export.
      */
-    class ANNCache2Telemetry
+    class ANNSCacheTelemetry
     {
     public:
         /**
          * @brief Constructs the module with the shared cache context.
          */
-        explicit ANNCache2Telemetry(ANNCache2Context* context) noexcept;
+        explicit ANNSCacheTelemetry(ANNSCacheContext* context) noexcept;
 
         /**
          * @brief Builds a human-readable status string.
@@ -35,6 +35,6 @@ namespace aker
         void exportTraceToFiles() noexcept;
 
     private:
-        ANNCache2Context* context_;
+        ANNSCacheContext* context_;
     };
 }

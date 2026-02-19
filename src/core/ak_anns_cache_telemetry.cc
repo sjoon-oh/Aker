@@ -1,4 +1,4 @@
-#include "core/ak_ann_cache2_telemetry.hh"
+#include "core/ak_anns_cache_telemetry.hh"
 
 #include <algorithm>
 #include <cassert>
@@ -31,13 +31,13 @@ namespace aker
         static constexpr const char* k_write_log_metrics_file = "aker_trace_write_log.csv";
     }
 
-    ANNCache2Telemetry::ANNCache2Telemetry(ANNCache2Context* context) noexcept
+    ANNSCacheTelemetry::ANNSCacheTelemetry(ANNSCacheContext* context) noexcept
         : context_(context)
     {
         assert(context_ != nullptr);
     }
 
-    std::string ANNCache2Telemetry::buildStatusText() noexcept
+    std::string ANNSCacheTelemetry::buildStatusText() noexcept
     {
         /* Build a human-readable cache status string.
          */
@@ -47,31 +47,30 @@ namespace aker
         size_t virtual_entry_count = 0;
         size_t valid_entry_count = 0;
 
-        context_->lookup_table->map.visit_all(
-            [&](const auto& pair)
+        for (const auto& pair : context_->lookup_table->map)
+        {
+            anns_cache_entry_t* entry = pair.second;
+            if (entry == nullptr)
+                continue;
+
+            if (entry->vector_slot_ref_list == nullptr)
+                continue;
+
+            if (entry->next != nullptr)
             {
-                if (pair.second->vector_slot_ref_list == nullptr)
+                size_t linked_count = 0;
+                anns_cache_entry_t* next_entry = entry->next;
+                while (next_entry != nullptr)
                 {
-                    return;
+                    ++linked_count;
+                    next_entry = next_entry->next;
                 }
+                virtual_entry_count += linked_count;
+            }
 
-                if (pair.second->next != nullptr)
-                {
-                    size_t linked_count = 0;
-                    result_cache_entry_t* next_entry = pair.second->next;
-                    while (next_entry != nullptr)
-                    {
-                        ++linked_count;
-                        next_entry = next_entry->next;
-                    }
-                    virtual_entry_count += linked_count;
-                }
-
-                if (pair.second->version != -1)
-                {
-                    ++valid_entry_count;
-                }
-            });
+            if (entry->version != -1)
+                ++valid_entry_count;
+        }
 
         const size_t physical_entry_count = (total_entry_count >= virtual_entry_count)
                                                ? (total_entry_count - virtual_entry_count)
@@ -83,7 +82,7 @@ namespace aker
                                           ? 0.0f
                                           : (static_cast<float>(context_->stats.cache_hit + context_->stats.cache_sim_hit) / denom);
 
-        oss << "ANNCache2 Status\n";
+        oss << "ANNSCache Status\n";
         oss << "  Total entries: " << total_entry_count << "\n";
         oss << "  Physical entries: " << physical_entry_count << "\n";
         oss << "  Virtual entries: " << virtual_entry_count << "\n";
@@ -110,7 +109,7 @@ namespace aker
         return oss.str();
     }
 
-    std::string ANNCache2Telemetry::buildSummaryCsv() noexcept
+    std::string ANNSCacheTelemetry::buildSummaryCsv() noexcept
     {
         /* Build a concise CSV key/value snapshot.
          */
@@ -121,45 +120,44 @@ namespace aker
         size_t virtual_entry_count = 0;
         size_t valid_entry_count = 0;
 
-        context_->lookup_table->map.visit_all(
-            [&](const auto& pair)
+        for (const auto& pair : context_->lookup_table->map)
+        {
+            anns_cache_entry_t* entry = pair.second;
+            if (entry == nullptr)
+                continue;
+
+            if (entry->vector_slot_ref_list == nullptr)
+                continue;
+
+            if (entry->next != nullptr)
             {
-                if (pair.second->vector_slot_ref_list == nullptr)
+                size_t linked_count = 0;
+                anns_cache_entry_t* next_entry = entry->next;
+                while (next_entry != nullptr)
                 {
-                    return;
+                    ++linked_count;
+                    next_entry = next_entry->next;
                 }
+                virtual_entry_count += linked_count;
+            }
 
-                if (pair.second->next != nullptr)
-                {
-                    size_t linked_count = 0;
-                    result_cache_entry_t* next_entry = pair.second->next;
-                    while (next_entry != nullptr)
-                    {
-                        ++linked_count;
-                        next_entry = next_entry->next;
-                    }
-                    virtual_entry_count += linked_count;
-                }
-
-                if (pair.second->version != -1)
-                {
-                    ++valid_entry_count;
-                }
-            });
+            if (entry->version != -1)
+                ++valid_entry_count;
+        }
 
         const size_t physical_entry_count = (total_entry_count >= virtual_entry_count)
                                                ? (total_entry_count - virtual_entry_count)
                                                : 0;
 
         size_t checkpoint_count = 0;
-        context_->lookup_table->map.visit_all(
-            [&](const auto& pair)
-            {
-                if (pair.second->checkpoint != nullptr)
-                {
-                    ++checkpoint_count;
-                }
-            });
+        for (const auto& pair : context_->lookup_table->map)
+        {
+            anns_cache_entry_t* entry = pair.second;
+            if (entry == nullptr)
+                continue;
+            if (entry->checkpoint != nullptr)
+                ++checkpoint_count;
+        }
 
         oss << "TotalEntryCount," << total_entry_count << "\n";
         oss << "PhysicalEntryCount," << physical_entry_count << "\n";
@@ -201,7 +199,7 @@ namespace aker
         return oss.str();
     }
 
-    void ANNCache2Telemetry::exportTraceToFiles() noexcept
+    void ANNSCacheTelemetry::exportTraceToFiles() noexcept
     {
         /* Export all telemetry under a single /tmp timestamped directory.
          */

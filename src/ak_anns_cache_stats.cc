@@ -1,4 +1,4 @@
-#include "core/ak_ann_cache_stats.hh"
+#include "core/ak_anns_cache_stats.hh"
 
 #include <algorithm>
 #include <cassert>
@@ -66,20 +66,20 @@ namespace aker
         }
     }
 
-    ANNCacheStats::ANNCacheStats() noexcept
+    ANNSCacheStats::ANNSCacheStats() noexcept
     {
         /* Initialize latency keys and reserve vectors to minimize runtime allocations.
          */
-        latency_series[static_cast<std::size_t>(LatencyMetric::k_sim_get_cache_entry)] = {"simGetCacheEntry", {}};
+        latency_series[static_cast<std::size_t>(LatencyMetric::k_get_cache_entry)] = {"getCacheEntry", {}};
         latency_series[static_cast<std::size_t>(LatencyMetric::k_insert_cache_entry)] = {"insertCacheEntry", {}};
         latency_series[static_cast<std::size_t>(LatencyMetric::k_link_cache_entry)] = {"linkCacheEntry", {}};
         latency_series[static_cast<std::size_t>(LatencyMetric::k_insert_write_log_entry)] = {"insertWriteLogEntry", {}};
         latency_series[static_cast<std::size_t>(LatencyMetric::k_mark_vector_deleted)] = {"markVectorDeleted", {}};
-        latency_series[static_cast<std::size_t>(LatencyMetric::k_consume_aged_write_log_entry)] = {"consumeAgedWriteLogEntry", {}};
+        latency_series[static_cast<std::size_t>(LatencyMetric::k_process_write_log_entries)] = {"processWriteLogEntries", {}};
 
-        latency_series[static_cast<std::size_t>(LatencyMetric::k_sim_get_cache_entry_step_1)] = {"simGetCacheEntry.step1", {}};
-        latency_series[static_cast<std::size_t>(LatencyMetric::k_sim_get_cache_entry_step_2)] = {"simGetCacheEntry.step2", {}};
-        latency_series[static_cast<std::size_t>(LatencyMetric::k_sim_get_cache_entry_step_3)] = {"simGetCacheEntry.step3", {}};
+        latency_series[static_cast<std::size_t>(LatencyMetric::k_get_cache_entry_step_1)] = {"getCacheEntry.step1", {}};
+        latency_series[static_cast<std::size_t>(LatencyMetric::k_get_cache_entry_step_2)] = {"getCacheEntry.step2", {}};
+        latency_series[static_cast<std::size_t>(LatencyMetric::k_get_cache_entry_step_3)] = {"getCacheEntry.step3", {}};
 
         latency_series[static_cast<std::size_t>(LatencyMetric::k_insert_cache_entry_step_1)] = {"insertCacheEntry.step1", {}};
         latency_series[static_cast<std::size_t>(LatencyMetric::k_insert_cache_entry_step_2)] = {"insertCacheEntry.step2", {}};
@@ -90,14 +90,14 @@ namespace aker
         latency_series[static_cast<std::size_t>(LatencyMetric::k_insert_write_log_entry_step_3)] = {"insertWriteLogEntry.step3", {}};
         latency_series[static_cast<std::size_t>(LatencyMetric::k_insert_write_log_entry_step_4)] = {"insertWriteLogEntry.step4", {}};
 
-        latency_series[static_cast<std::size_t>(LatencyMetric::k_evict_vectors_step_1)] = {"_evictVectors.step1", {}};
-        latency_series[static_cast<std::size_t>(LatencyMetric::k_evict_vectors_step_2)] = {"_evictVectors.step2", {}};
-        latency_series[static_cast<std::size_t>(LatencyMetric::k_evict_vectors_step_3)] = {"_evictVectors.step3", {}};
+        latency_series[static_cast<std::size_t>(LatencyMetric::k_evict_cache_entries_step_1)] = {"evictCacheEntries.step1", {}};
+        latency_series[static_cast<std::size_t>(LatencyMetric::k_evict_cache_entries_step_2)] = {"evictCacheEntries.step2", {}};
+        latency_series[static_cast<std::size_t>(LatencyMetric::k_evict_cache_entries_step_3)] = {"evictCacheEntries.step3", {}};
 
-        latency_series[static_cast<std::size_t>(LatencyMetric::k_incr_batch_update_write_log_step_1)] = {"_incrBatchUpdateWriteLog.step1", {}};
-        latency_series[static_cast<std::size_t>(LatencyMetric::k_incr_batch_update_write_log_step_2)] = {"_incrBatchUpdateWriteLog.step2", {}};
-        latency_series[static_cast<std::size_t>(LatencyMetric::k_incr_batch_update_write_log_step_3)] = {"_incrBatchUpdateWriteLog.step3", {}};
-        latency_series[static_cast<std::size_t>(LatencyMetric::k_incr_batch_update_write_log_step_4)] = {"_incrBatchUpdateWriteLog.step4", {}};
+        latency_series[static_cast<std::size_t>(LatencyMetric::k_write_log_slow_path_step_1)] = {"runWriteLogSlowPath.step1", {}};
+        latency_series[static_cast<std::size_t>(LatencyMetric::k_write_log_slow_path_step_2)] = {"runWriteLogSlowPath.step2", {}};
+        latency_series[static_cast<std::size_t>(LatencyMetric::k_write_log_slow_path_step_3)] = {"runWriteLogSlowPath.step3", {}};
+        latency_series[static_cast<std::size_t>(LatencyMetric::k_write_log_slow_path_step_4)] = {"runWriteLogSlowPath.step4", {}};
 
         for (LatencySeries& series : latency_series)
         {
@@ -113,7 +113,7 @@ namespace aker
         clear();
     }
 
-    void ANNCacheStats::clear() noexcept
+    void ANNSCacheStats::clear() noexcept
     {
         /* Reset counters and clear all series buffers.
          */
@@ -136,7 +136,7 @@ namespace aker
         history_sequence = 0;
     }
 
-    void ANNCacheStats::recordHitHistory() noexcept
+    void ANNSCacheStats::recordHitHistory() noexcept
     {
         /* Store hit ratio history without timestamps.
          */
@@ -148,7 +148,7 @@ namespace aker
         cache_total_hit_ratios.push_back(total_ratio);
     }
 
-    void ANNCacheStats::recordCacheHistorySample(
+    void ANNSCacheStats::recordCacheHistorySample(
         const char* op_name,
         double latency_ms,
         size_t cache_entry_count,
@@ -180,7 +180,7 @@ namespace aker
         cache_history.push_back(sample);
     }
 
-    void ANNCacheStats::appendLatencySample(LatencyMetric metric, const ElapsedLatencyPair& sample) noexcept
+    void ANNSCacheStats::appendLatencySample(LatencyMetric metric, const ElapsedLatencyPair& sample) noexcept
     {
         /* Append a latency sample with minimal key overhead.
          */
@@ -194,7 +194,7 @@ namespace aker
         latency_series[idx].samples.push_back(sample);
     }
 
-    const char* ANNCacheStats::getLatencyKey(LatencyMetric metric) const noexcept
+    const char* ANNSCacheStats::getLatencyKey(LatencyMetric metric) const noexcept
     {
         const std::size_t idx = static_cast<std::size_t>(metric);
         if (idx >= latency_series.size())
@@ -204,7 +204,7 @@ namespace aker
         return latency_series[idx].key;
     }
 
-    std::string ANNCacheStats::makeTraceDirectoryPath() noexcept
+    std::string ANNSCacheStats::makeTraceDirectoryPath() noexcept
     {
         /* Build a timestamped directory under /tmp.
          */
@@ -220,7 +220,7 @@ namespace aker
         return oss.str();
     }
 
-    bool ANNCacheStats::ensureDirectoryExists(const std::string& path) noexcept
+    bool ANNSCacheStats::ensureDirectoryExists(const std::string& path) noexcept
     {
         /* Create a single directory. Parent directories are assumed to exist.
          */
@@ -239,7 +239,7 @@ namespace aker
         return errno == EEXIST;
     }
 
-    void ANNCacheStats::exportLatencySeriesLocked(const std::string& directory_path) noexcept
+    void ANNSCacheStats::exportLatencySeriesLocked(const std::string& directory_path) noexcept
     {
         /* Write one CSV per key plus an aggregated summary.
          */
@@ -300,7 +300,7 @@ namespace aker
         }
     }
 
-    void ANNCacheStats::exportCacheHistoryLocked(const std::string& directory_path) noexcept
+    void ANNSCacheStats::exportCacheHistoryLocked(const std::string& directory_path) noexcept
     {
         /* Export a concise per-request cache history.
          */
@@ -331,7 +331,7 @@ namespace aker
         file.close();
     }
 
-    void ANNCacheStats::exportDerivedHistoriesLocked(const std::string& directory_path) noexcept
+    void ANNSCacheStats::exportDerivedHistoriesLocked(const std::string& directory_path) noexcept
     {
         /* Export hit ratio and approx filter histories.
          */
@@ -366,7 +366,7 @@ namespace aker
         }
     }
 
-    std::string ANNCacheStats::exportTraceToFiles() noexcept
+    std::string ANNSCacheStats::exportTraceToFiles() noexcept
     {
         /* Export all telemetry under a timestamped directory.
          */
@@ -382,25 +382,25 @@ namespace aker
         return trace_directory_path_;
     }
 
-    const std::string& ANNCacheStats::getTraceDirectoryPath() const noexcept
+    const std::string& ANNSCacheStats::getTraceDirectoryPath() const noexcept
     {
         return trace_directory_path_;
     }
 
-    void ANNCacheStats::printAll() noexcept
+    void ANNSCacheStats::printAll() noexcept
     {
         /* Lightweight log dump for debugging.
          */
         std::lock_guard<SpinMutex> stats_guard(stats_lock);
 
-        AKER_LOG_INFO << "[ANNCacheStats] cache_hit=" << cache_hit
+        AKER_LOG_INFO << "[ANNSCacheStats] cache_hit=" << cache_hit
                       << " cache_sim_hit=" << cache_sim_hit
                       << " cache_miss=" << cache_miss
                       << " cache_evict=" << cache_evict;
 
         for (const LatencySeries& series : latency_series)
         {
-            AKER_LOG_INFO << "[ANNCacheStats] latency_series(" << series.key
+            AKER_LOG_INFO << "[ANNSCacheStats] latency_series(" << series.key
                           << ") count=" << series.samples.size();
         }
     }

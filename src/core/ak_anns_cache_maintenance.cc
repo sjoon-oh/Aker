@@ -7,8 +7,8 @@
 #include <memory>
 #include <vector>
 
-#include "core/ak_ann_cache2_maintenance.hh"
-#include "core/ak_ann_cache2_entry_store.hh"
+#include "core/ak_anns_cache_maintenance.hh"
+#include "core/ak_anns_cache_entry_store.hh"
 #include "ak_logger.hh"
 #include "utils/ak_malloc_ptr.hh"
 
@@ -18,7 +18,7 @@ namespace aker
      * Slot VectorSlot elements are intentionally not deleted here.
      */
     static inline void
-    destroyCacheEntryObject(result_cache_entry_t* entry) noexcept
+    destroyCacheEntryObject(anns_cache_entry_t* entry) noexcept
     {
         if (entry == nullptr)
             return;
@@ -32,7 +32,7 @@ namespace aker
         delete entry;
     }
 
-    ANNCache2Maintenance::ANNCache2Maintenance(ANNCache2Context* context, ANNCache2EntryStore* entry_store) noexcept
+    ANNSCacheMaintenance::ANNSCacheMaintenance(ANNSCacheContext* context, ANNSCacheEntryStore* entry_store) noexcept
         : context_(context),
           entry_store_(entry_store)
     {
@@ -41,7 +41,7 @@ namespace aker
     }
 
     bool
-    ANNCache2Maintenance::needEvictLocked(size_t vector_list_size) noexcept
+    ANNSCacheMaintenance::needEvictLocked(size_t vector_list_size) noexcept
     {
         /* Conservative eviction decision based on pool size and incoming list size.
          */
@@ -50,31 +50,40 @@ namespace aker
     }
 
     void
-    ANNCache2Maintenance::evictVectorsLocked(size_t to_evicts, std::vector<vector_id_t>& evicted_list) noexcept
+    ANNSCacheMaintenance::evictCacheEntriesLocked(size_t to_evicts, std::vector<vector_id_t>& evicted_list) noexcept
     {
         /* Evicts entries using the configured eviction strategy.
-         * This preserves original semantics, including releasing pool vectors and unlinking child entries.
+         *
+         * IMPORTANT: The eviction target (to_evicts) is expressed in the number of vectors
+         * physically removed from the vector pool (i.e., refcount reaches zero and the slot
+         * is deleted). It is NOT the number of cache entries to evict. This preserves the
+         * original eviction semantics where shared vectors may require evicting additional
+         * cache entries until enough pool vectors are actually freed.
          */
+        if (to_evicts == 0)
+            return;
+
         size_t eviction_size = 0;
 
         /* Emit eviction request for debugging.
          */
-        AKER_LOG_DEBUG << "[ANNCacheMaintenance] eviction requested: to_evicts=" << to_evicts;
+        AKER_LOG_DEBUG << "[ANNSCacheMaintenance] eviction requested: to_evicts=" << to_evicts;
 
-        for (size_t i = 0; i < to_evicts; i++)
+        while (eviction_size < to_evicts)
         {
             vector_id_t evict_candidate_id = context_->eviction_strategy->nextEvictCandidate();
             if (evict_candidate_id == 0)
                 break;
 
-            result_cache_entry_t* evict_candidate_entry = entry_store_->getCEntry(evict_candidate_id);
+            anns_cache_entry_t* evict_candidate_entry = entry_store_->getCacheEntry(evict_candidate_id);
             if (evict_candidate_entry == nullptr)
                 continue;
 
-            AKER_LOG_DEBUG << "[ANNCacheMaintenance] evicting entry: vector_id=" << evict_candidate_id
+            AKER_LOG_DEBUG << "[ANNSCacheMaintenance] evicting entry: vector_id=" << evict_candidate_id
                           << " list_size=" << evict_candidate_entry->vector_list_size;
 
             /* Release all pooled vectors referenced by this entry.
+             * We count only actual deletions (refcount reaches zero) toward the eviction target.
              */
             for (size_t j = 0; j < evict_candidate_entry->vector_list_size; j++)
             {
@@ -89,11 +98,11 @@ namespace aker
 
             /* Remove linked child entries.
              */
-            result_cache_entry_t* child_entry = evict_candidate_entry->next;
+            anns_cache_entry_t* child_entry = evict_candidate_entry->next;
             while (child_entry != nullptr)
             {
                 vector_id_t child_vector_id = child_entry->query_vector->getVectorId();
-                result_cache_entry_t* next = child_entry->next;
+                anns_cache_entry_t* next = child_entry->next;
 
                 context_->lookup_table->map.erase(child_vector_id);
                 destroyCacheEntryObject(child_entry);
@@ -129,14 +138,60 @@ namespace aker
 
         if (!evicted_list.empty())
         {
-            AKER_LOG_INFO << "[ANNCacheMaintenance] evicted entries: count=" << evicted_list.size();
+            AKER_LOG_INFO << "[ANNSCacheMaintenance] evicted entries: count=" << evicted_list.size();
+        }
+    }
+
+            /* Remove linked child entries.
+             */
+            anns_cache_entry_t* child_entry = evict_candidate_entry->next;
+            while (child_entry != nullptr)
+            {
+                vector_id_t child_vector_id = child_entry->query_vector->getVectorId();
+                anns_cache_entry_t* next = child_entry->next;
+
+                context_->lookup_table->map.erase(child_vector_id);
+                destroyCacheEntryObject(child_entry);
+
+                child_entry = next;
+            }
+
+            /* Update write-log statistics based on checkpoint distance.
+             */
+            epoch_t unseen = 0;
+            if (evict_candidate_entry->checkpoint != nullptr)
+            {
+                unseen = context_->write_log->getUnseenDistance(evict_candidate_entry->checkpoint);
+                context_->write_log->releaseCheckpoint(evict_candidate_entry->checkpoint);
+                evict_candidate_entry->checkpoint = nullptr;
+            }
+
+            context_->write_log->removeCacheEntryFromRoundRobin(static_cast<void*>(evict_candidate_entry));
+
+            context_->lookup_table->map.erase(evict_candidate_id);
+            context_->repr_entry_count = context_->eviction_strategy->getCurrSize();
+
+            context_->write_log->removeCacheEntryRisk(evict_candidate_entry->risk_factor, unseen, context_->repr_entry_count);
+
+            context_->evict_entry_count++;
+            destroyCacheEntryObject(evict_candidate_entry);
+
+            evicted_list.push_back(evict_candidate_id);
+        }
+
+        context_->stats.cache_evict += eviction_size;
+        context_->write_log->trimUnreferencedHeadEntries();
+
+        if (!evicted_list.empty())
+        {
+            AKER_LOG_INFO << "[ANNSCacheMaintenance] evicted entries: count=" << evicted_list.size();
         }
     }
 
     bool
-    ANNCache2Maintenance::insertCEntryLocked(
+    ANNSCacheMaintenance::insertCacheEntryLocked(
         vector_id_t vector_id,
-        result_cache_entry_t* entry,
+        anns_cache_entry_t* entry,
         vector_view_t query_vector_data) noexcept
     {
         /* Inserts a prepared entry into the cache.
@@ -149,17 +204,11 @@ namespace aker
         ElapsedLatencyPair latency_int_2;
         ElapsedLatencyPair latency_int_3;
 
-        result_cache_entry_t* allocated_entry = entry;
+        anns_cache_entry_t* allocated_entry = entry;
 
-        int inserted = context_->lookup_table->map.try_emplace_or_visit(
-            vector_id,
-            entry,
-            [&](const auto& pair)
-            {
-                (void)pair;
-            });
-
-        if (inserted == 0)
+        const auto emplace_result = context_->lookup_table->map.emplace(vector_id, entry);
+        const bool inserted = emplace_result.second;
+        if (!inserted)
             return false;
 
         /* Optional eviction path.
@@ -169,22 +218,22 @@ namespace aker
             latency_int_1.start();
 
             std::vector<vector_id_t> evicted_list;
-            evictVectorsLocked(allocated_entry->vector_list_size, evicted_list);
+            evictCacheEntriesLocked(allocated_entry->vector_list_size, evicted_list);
 
             if (!evicted_list.empty())
             {
                 context_->apprx_filter->deleteVectors(evicted_list);
-                AKER_LOG_DEBUG << "[ANNCacheMaintenance] approx filter deleted vectors: count=" << evicted_list.size();
+                AKER_LOG_DEBUG << "[ANNSCacheMaintenance] approx filter deleted vectors: count=" << evicted_list.size();
                 if (context_->apprx_filter->needSwitch())
                 {
-                    AKER_LOG_INFO << "[ANNCacheMaintenance] approx filter generation rotate triggered";
+                    AKER_LOG_INFO << "[ANNSCacheMaintenance] approx filter generation rotate triggered";
                     context_->apprx_filter->rotateGeneration();
                 }
             }
 
             latency_int_1.end();
             latency_int_1.setAux1(evicted_list.size());
-            context_->stats.appendLatencySample(ANNCacheStats::LatencyMetric::k_insert_cache_entry_step_1, latency_int_1);
+            context_->stats.appendLatencySample(ANNSCacheStats::LatencyMetric::k_insert_cache_entry_step_1, latency_int_1);
         }
 
         /* Setup metadata for the inserted entry.
@@ -199,10 +248,10 @@ namespace aker
          */
         latency_int_2.start();
         context_->apprx_filter->addVector(query_vector_data);
-        AKER_LOG_DEBUG << "[ANNCacheMaintenance] approx filter added representative vector: query_id="
+        AKER_LOG_DEBUG << "[ANNSCacheMaintenance] approx filter added representative vector: query_id="
                       << query_vector_data.vector_id;
         latency_int_2.end();
-        context_->stats.appendLatencySample(ANNCacheStats::LatencyMetric::k_insert_cache_entry_step_2, latency_int_2);
+        context_->stats.appendLatencySample(ANNSCacheStats::LatencyMetric::k_insert_cache_entry_step_2, latency_int_2);
 
         /* Transfer vector slots into the pool.
          */
@@ -225,7 +274,7 @@ namespace aker
                 pooled_vector->setDistance(dist);
         }
 
-        allocated_entry->entry_kind = RESULT_CACHE_ENTRY_KIND_INTERNAL;
+        allocated_entry->entry_kind = ANNS_CACHE_ENTRY_KIND_INTERNAL;
 
         assert(allocated_entry->vector_list_size >= context_->parameter.capacity.vector_in_topk);
         assert(dist_max >= dist_topk);
@@ -241,7 +290,7 @@ namespace aker
         context_->eviction_strategy->addEvictCandidate(vector_id);
         context_->repr_entry_count = context_->eviction_strategy->getCurrSize();
 
-        AKER_LOG_DEBUG << "[ANNCacheMaintenance] inserted cache entry finalized: vector_id=" << vector_id
+        AKER_LOG_DEBUG << "[ANNSCacheMaintenance] inserted cache entry finalized: vector_id=" << vector_id
                       << " risk_factor=" << allocated_entry->risk_factor
                       << " repr_entry_count=" << context_->repr_entry_count;
 
@@ -249,7 +298,7 @@ namespace aker
         context_->write_log->addCacheEntryRisk(allocated_entry->risk_factor, 0, context_->repr_entry_count);
 
         latency_int_3.end();
-        context_->stats.appendLatencySample(ANNCacheStats::LatencyMetric::k_insert_cache_entry_step_3, latency_int_3);
+        context_->stats.appendLatencySample(ANNSCacheStats::LatencyMetric::k_insert_cache_entry_step_3, latency_int_3);
 
         context_->stats.approx_added_counts.push_back(context_->apprx_filter->getAddedCounts());
         context_->stats.approx_representative_counts.push_back(context_->apprx_filter->getRepresentativeVectorNumber());
@@ -258,7 +307,7 @@ namespace aker
     }
 
     void
-    ANNCache2Maintenance::consumeAgedWLEntryLocked(
+    ANNSCacheMaintenance::processWriteLogEntriesLocked(
         distance_function_t distance_function,
         result_conversion_function_t result_conversion_function) noexcept
     {
@@ -269,39 +318,28 @@ namespace aker
         if (context_->try_read_count > (k_try_read_ratio_thresh * context_->repr_entry_count))
         {
             if (context_->write_log->shouldRunSlowPath())
-                incrBatchUpdateWLog2Locked(distance_function, result_conversion_function);
+                runWriteLogSlowPathLocked(distance_function, result_conversion_function);
             context_->try_read_count = 0;
         }
     }
 
     void
-
-    void
-    ANNCache2Maintenance::updateWLEntryFastPathLocked(
+    ANNSCacheMaintenance::updateWriteLogFastPathLocked(
         vector_view_t write_vector,
         distance_function_t distance_function,
-        result_conversion_function_t result_conversion_function) noexcept
+        result_conversion_function_t result_conversion_function,
+        const float* write_vector_float) noexcept
     {
         /* Fast-path write-log update that opportunistically improves a nearby entry.
          */
         static constexpr faiss::idx_t k_search_per_filter = 1;
         static constexpr size_t k_candidate_count = 2;
 
-        MallocPtr<float> query_vector = makeMallocPtr<float>(context_->parameter.vector_format.vector_dim);
-
         std::array<float, k_candidate_count> distances{};
         std::array<faiss::idx_t, k_candidate_count> labels{};
 
-        bool convert_success = write_vector.conversion_function(
-            write_vector.vector_data,
-            write_vector.vector_data_size,
-            write_vector.vector_dim,
-            query_vector.get(),
-            write_vector.aux);
-        (void)convert_success;
-
         context_->apprx_filter->searchSimilarVectors(
-            query_vector.get(),
+            write_vector_float,
             k_search_per_filter,
             distances.data(),
             labels.data());
@@ -315,7 +353,7 @@ namespace aker
                 continue;
 
             vector_id_t vector_id = static_cast<vector_id_t>(labels[i]);
-            result_cache_entry_t* found_entry = entry_store_->getCEntry(vector_id);
+            anns_cache_entry_t* found_entry = entry_store_->getCacheEntry(vector_id);
             if (found_entry == nullptr)
                 continue;
 
@@ -373,7 +411,7 @@ namespace aker
     }
 
     void
-    ANNCache2Maintenance::incrBatchUpdateWLog2Locked(
+    ANNSCacheMaintenance::runWriteLogSlowPathLocked(
         distance_function_t distance_function,
         result_conversion_function_t result_conversion_function) noexcept
     {
@@ -387,14 +425,13 @@ namespace aker
         ElapsedLatencyPair latency_int_2;
 
         cache_entry_handle_t rr_handle = context_->write_log->getNextCacheEntryFromRoundRobin();
-        result_cache_entry_t* saved_entry = static_cast<result_cache_entry_t*>(rr_handle);
+        anns_cache_entry_t* saved_entry = static_cast<anns_cache_entry_t*>(rr_handle);
         if (saved_entry == nullptr)
             return;
 
         vector_id_t vector_id = saved_entry->query_vector->getVectorId();
 
-        bool found = false;
-        context_->lookup_table->map.visit(vector_id, [&](const auto& pair) { (void)pair; found = true; });
+        const bool found = (context_->lookup_table->map.find(vector_id) != context_->lookup_table->map.end());
         assert(found == true);
 
         WriteLogScanResult scan_result;
@@ -416,7 +453,7 @@ namespace aker
             });
 
         latency_int_1.end();
-        context_->stats.appendLatencySample(ANNCacheStats::LatencyMetric::k_incr_batch_update_write_log_step_1, latency_int_1);
+        context_->stats.appendLatencySample(ANNSCacheStats::LatencyMetric::k_write_log_slow_path_step_1, latency_int_1);
 
         latency_int_2.start();
 
@@ -490,24 +527,25 @@ namespace aker
         }
 
         latency_int_2.end();
-        context_->stats.appendLatencySample(ANNCacheStats::LatencyMetric::k_incr_batch_update_write_log_step_2, latency_int_2);
+        context_->stats.appendLatencySample(ANNSCacheStats::LatencyMetric::k_write_log_slow_path_step_2, latency_int_2);
 
         context_->write_log->replaceCheckpoint(saved_entry->checkpoint, scan_result.new_checkpoint);
         context_->write_log->consumeUnseenDistance(scan_result.advanced_epoch_distance, context_->repr_entry_count);
     }
 
     void
-    ANNCache2Maintenance::insertWLEntry3Locked(
+    ANNSCacheMaintenance::insertWriteLogEntryLocked(
         vector_view_t write_vector,
         distance_function_t distance_function,
-        result_conversion_function_t result_conversion_function) noexcept
+        result_conversion_function_t result_conversion_function,
+        const float* write_vector_float) noexcept
     {
         /* Write-log insertion is staged with latency sub-counters.
          */
         /* Step-level latency is recorded as separate series.
          */
 
-        AKER_LOG_DEBUG << "[ANNCacheMaintenance] write-log insert begin: vector_id=" << write_vector.vector_id;
+        AKER_LOG_DEBUG << "[ANNSCacheMaintenance] write-log insert begin: vector_id=" << write_vector.vector_id;
 
         ElapsedLatencyPair latency_int_1;
         ElapsedLatencyPair latency_int_2;
@@ -522,45 +560,45 @@ namespace aker
             write_vector.aux_data_1,
             write_vector.aux_data_2);
         latency_int_1.end();
-        context_->stats.appendLatencySample(ANNCacheStats::LatencyMetric::k_insert_write_log_entry_step_1, latency_int_1);
+        context_->stats.appendLatencySample(ANNSCacheStats::LatencyMetric::k_insert_write_log_entry_step_1, latency_int_1);
 
         latency_int_2.start();
-        updateWLEntryFastPathLocked(write_vector, distance_function, result_conversion_function);
+        updateWriteLogFastPathLocked(write_vector, distance_function, result_conversion_function, write_vector_float);
         latency_int_2.end();
-        context_->stats.appendLatencySample(ANNCacheStats::LatencyMetric::k_insert_write_log_entry_step_2, latency_int_2);
+        context_->stats.appendLatencySample(ANNSCacheStats::LatencyMetric::k_insert_write_log_entry_step_2, latency_int_2);
 
         latency_int_3.start();
-        consumeAgedWLEntryLocked(distance_function, result_conversion_function);
+        processWriteLogEntriesLocked(distance_function, result_conversion_function);
         latency_int_3.end();
-        context_->stats.appendLatencySample(ANNCacheStats::LatencyMetric::k_insert_write_log_entry_step_3, latency_int_3);
+        context_->stats.appendLatencySample(ANNSCacheStats::LatencyMetric::k_insert_write_log_entry_step_3, latency_int_3);
 
         latency_int_4.start();
         context_->write_log->trimUnreferencedHeadEntries();
         latency_int_4.end();
-        context_->stats.appendLatencySample(ANNCacheStats::LatencyMetric::k_insert_write_log_entry_step_4, latency_int_4);
+        context_->stats.appendLatencySample(ANNSCacheStats::LatencyMetric::k_insert_write_log_entry_step_4, latency_int_4);
 
-        AKER_LOG_DEBUG << "[ANNCacheMaintenance] write-log insert end";
+        AKER_LOG_DEBUG << "[ANNSCacheMaintenance] write-log insert end";
     }
 
     void
-    ANNCache2Maintenance::markVectorDeletedLocked(vector_id_t vector_id) noexcept
+    ANNSCacheMaintenance::markVectorDeletedLocked(vector_id_t vector_id) noexcept
     {
-        AKER_LOG_INFO << "[ANNCacheMaintenance] markVectorDeleted: vector_id=" << vector_id;
+        AKER_LOG_INFO << "[ANNSCacheMaintenance] markVectorDeleted: vector_id=" << vector_id;
         context_->vector_pool->invalidateVector(vector_id);
     }
 
     void
-    ANNCache2Maintenance::collectPooledVectorsLocked(std::vector<VectorSlot*>& pooled_list) noexcept
+    ANNSCacheMaintenance::collectPooledVectorsLocked(std::vector<VectorSlot*>& pooled_list) noexcept
     {
         context_->vector_pool->collectPooledVectors(pooled_list);
     }
 
     void
-    ANNCache2Maintenance::resetCacheLocked() noexcept
+    ANNSCacheMaintenance::resetCacheLocked() noexcept
     {
         /* Reset write-log and eviction structures first to avoid stale pointers.
          */
-        AKER_LOG_INFO << "[ANNCacheMaintenance] resetCacheLocked";
+        AKER_LOG_INFO << "[ANNSCacheMaintenance] resetCacheLocked";
         context_->write_log->clear();
 
         context_->eviction_strategy = std::make_unique<EvictionStrategyFifo>();
@@ -576,7 +614,7 @@ namespace aker
     }
 
     void
-    ANNCache2Maintenance::stressTestInvalidateRandomLocked(float percent) noexcept
+    ANNSCacheMaintenance::stressTestInvalidateRandomLocked(float percent) noexcept
     {
         if (percent < 0.0f || percent > 100.0f)
             return;

@@ -2,15 +2,14 @@
 // Author: Sukjoon Oh
 //
 // Refactor note:
-// - Replace a single global lock with sharded (striped) spin locks for better concurrency.
-// - Remove unused/unsafe APIs and provide a clearer pool API.
-// - Keep the original pool semantics: reference-counted VectorSlot instances keyed by vector_id.
+// - This pool is now optimized for a global cache lock configuration.
+// - Internal sharding and per-shard locks are removed to reduce memory/CPU overhead.
+// - The public API and semantics remain the same: reference-counted VectorSlot keyed by vector_id.
 //
 
 #ifndef AKER_VECTOR_SLOT_POOL_H
 #define AKER_VECTOR_SLOT_POOL_H
 
-#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -18,93 +17,139 @@
 #include <vector>
 
 #include "ak_vector_slot.hh"
-#include "utils/ak_spin_mutex.hh"
+#include "utils/ak_lock.hh"
 
 namespace aker
 {
+    /**
+     * @brief Reference-counted pool of shared VectorSlot objects.
+     *
+     * In Aker's default configuration, the upper ANNSCache layer holds a global
+     * lock that serializes all cache mutations. Under that model, internal pool
+     * sharding/locking provides little benefit and adds overhead.
+     *
+     * This pool still supports optional internal locking via `AKER_ENABLE_INTERNAL_LOCKS`.
+     */
     class VectorSlotPool
     {
     private:
-        /* A shard owns a subset of IDs protected by a dedicated spin lock.
+        /**
+         * @brief Optional internal lock for standalone use.
          */
-        struct Shard
-        {
-            SpinMutex                                   shard_lock_;
-            std::unordered_map<vector_id_t, VectorSlot*>    vector_map_;
-        };
+        mutable InternalMutex pool_lock_;
 
-        /* Pool configuration and counters.
+        /**
+         * @brief Map from vector_id to pooled VectorSlot.
          */
-        const size_t                                    pool_capacity_;
-        std::atomic<size_t>                             pool_size_;
-        const size_t                                    payload_size_;
+        std::unordered_map<vector_id_t, VectorSlot*> vector_map_;
 
-        /* Sharding configuration.
+        /**
+         * @brief Maximum pool capacity (number of pooled vectors).
          */
-        const size_t                                    shard_count_;
-        const size_t                                    shard_mask_;
-        std::vector<Shard>                              shards_;
+        const size_t pool_capacity_;
 
-        /* Internal helpers.
+        /**
+         * @brief Payload size in bytes for each pooled vector.
          */
-        size_t                                          getShardIndex(vector_id_t vector_id) const noexcept;
-        Shard&                                          getShardByIndex(size_t shard_index) noexcept;
-        const Shard&                                    getShardByIndex(size_t shard_index) const noexcept;
+        const size_t payload_size_;
 
-        VectorSlot*                                        acquireOrCreateVectorLocked(
-                                                            Shard& shard,
-                                                            vector_id_t vector_id,
-                                                            const vector_data_t* vector_data) noexcept;
+        /**
+         * @brief Acquires or creates a vector slot while holding the pool lock.
+         */
+        VectorSlot* acquireOrCreateVectorUnsafe(
+            vector_id_t vector_id,
+            const vector_data_t* vector_data) noexcept;
 
-        bool                                            releaseVectorReferenceLocked(
-                                                            Shard& shard,
-                                                            vector_id_t vector_id,
-                                                            VectorSlot** deleted_vector) noexcept;
+        /**
+         * @brief Releases one reference while holding the pool lock.
+         */
+        bool releaseVectorReferenceUnsafe(
+            vector_id_t vector_id,
+            VectorSlot** deleted_vector) noexcept;
 
     public:
-        static constexpr size_t                         kDefaultShardCount = 1024;
+        /**
+         * @brief Legacy shard count default retained for API compatibility.
+         */
+        static constexpr size_t kDefaultShardCount = 1;
 
-        VectorSlotPool(size_t pool_capacity, size_t payload_size,
-                   size_t shard_count = kDefaultShardCount) noexcept;
+        /**
+         * @brief Constructs a pool.
+         */
+        VectorSlotPool(
+            size_t pool_capacity,
+            size_t payload_size,
+            size_t /*shard_count*/ = kDefaultShardCount) noexcept;
 
+        /**
+         * @brief Destructor releases all managed vectors.
+         */
         virtual ~VectorSlotPool() noexcept;
 
-        /* Main pool API.
-         * acquireOrCreateVector() increases refcount on hit; creates a new VectorSlot on miss.
-         * releaseVectorReference() decreases refcount and deletes when it reaches zero.
+        VectorSlotPool(const VectorSlotPool&) = delete;
+        VectorSlotPool& operator=(const VectorSlotPool&) = delete;
+
+        /**
+         * @brief Returns an existing pooled vector or creates a new one.
          */
-        VectorSlot*                                        acquireOrCreateVector(
-                                                            vector_id_t vector_id,
-                                                            const vector_data_t* vector_data) noexcept;
+        VectorSlot* acquireOrCreateVector(
+            vector_id_t vector_id,
+            const vector_data_t* vector_data) noexcept;
 
-        bool                                            releaseVectorReference(vector_id_t vector_id) noexcept;
-
-        VectorSlot*                                        replaceVectorReference(
-                                                            vector_id_t delete_vector_id,
-                                                            vector_id_t alloc_vector_id,
-                                                            const vector_data_t* alloc_vector_data) noexcept;
-
-        bool                                            invalidateVector(vector_id_t vector_id) noexcept;
-
-        /* Accessors.
+        /**
+         * @brief Releases one reference and deletes the vector when refcount reaches zero.
          */
-        size_t                                          getCapacity() const noexcept;
-        size_t                                          getSize() const noexcept;
-        size_t                                          getPayloadSize() const noexcept;
-        size_t                                          getShardCount() const noexcept;
+        bool releaseVectorReference(vector_id_t vector_id) noexcept;
 
-        /* Test/debug helpers.
-         * collectPooledVectors() and clear() are expected to be called by a single thread.
+        /**
+         * @brief Replaces a reference to `delete_vector_id` with a reference to `alloc_vector_id`.
          */
-        void                                            collectPooledVectors(
-                                                            std::vector<VectorSlot*>& pooled_list) noexcept;
+        VectorSlot* replaceVectorReference(
+            vector_id_t delete_vector_id,
+            vector_id_t alloc_vector_id,
+            const vector_data_t* alloc_vector_data) noexcept;
 
-        void                                            clear() noexcept;
+        /**
+         * @brief Marks a pooled vector invalid.
+         */
+        bool invalidateVector(vector_id_t vector_id) noexcept;
+
+        /**
+         * @brief Returns pool capacity.
+         */
+        size_t getCapacity() const noexcept;
+
+        /**
+         * @brief Returns current number of pooled vectors.
+         */
+        size_t getSize() const noexcept;
+
+        /**
+         * @brief Returns payload size.
+         */
+        size_t getPayloadSize() const noexcept;
+
+        /**
+         * @brief Returns the number of internal shards.
+         *
+         * This pool uses a single map under the global-cache-lock model.
+         */
+        size_t getShardCount() const noexcept;
+
+        /**
+         * @brief Collects all pooled vectors.
+         */
+        void collectPooledVectors(std::vector<VectorSlot*>& pooled_list) noexcept;
+
+        /**
+         * @brief Clears all pooled vectors.
+         */
+        void clear() noexcept;
 
         /**
          * @brief Returns a human-readable status string.
          */
-        std::string                                     getStatusText() noexcept;
+        std::string getStatusText() noexcept;
     };
 }
 

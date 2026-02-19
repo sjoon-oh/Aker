@@ -10,30 +10,30 @@
 #include "ak_vector_slot_pool.hh"
 #include "ak_write_log.hh"
 
-#include "core/ak_ann_cache_stats.hh"
-#include "core/ak_ann_cache2_types.hh"
+#include "core/ak_anns_cache_stats.hh"
+#include "core/ak_anns_cache_types.hh"
 #include "utils/ak_spin_mutex.hh"
 
 namespace aker
 {
     /**
-     * @brief Internal shared context for ANNCache2 modules.
+     * @brief Internal shared context for ANNSCache modules.
      *
      * This structure owns the cache's core state and is shared across internal modules.
-     * It exists to keep ANNCache2 as a thin facade while allowing modules to access
+     * It exists to keep ANNSCache as a thin facade while allowing modules to access
      * the same state without friend relationships.
      */
-    struct ANNCache2Context
+    struct ANNSCacheContext
     {
         /**
          * @brief Cache configuration parameters.
          */
-        ann_cache_config_t parameter;
+        anns_cache_config_t parameter;
 
         /**
          * @brief Telemetry statistics.
          */
-        ann_cache_stats_t stats;
+        anns_cache_stats_t stats;
 
         /**
          * @brief Current representative entry count.
@@ -43,7 +43,7 @@ namespace aker
         /**
          * @brief Query-id to cache-entry lookup table.
          */
-        std::unique_ptr<result_cache_table2_t> lookup_table;
+        std::unique_ptr<anns_cache_table_t> lookup_table;
 
         /**
          * @brief Vector pool storing shared result vectors.
@@ -88,14 +88,14 @@ namespace aker
         /**
          * @brief Constructs a context and initializes owned components.
          */
-        explicit ANNCache2Context(const ann_cache_config_t& parameter_info) noexcept;
+        explicit ANNSCacheContext(const anns_cache_config_t& parameter_info) noexcept;
 
         /**
          * @brief Destructor.
          */
-        ~ANNCache2Context() noexcept;
+        ~ANNSCacheContext() noexcept;
 
-        ANNCache2Context(const ANNCache2Context&) = delete;
-        ANNCache2Context& operator=(const ANNCache2Context&) = delete;
+        ANNSCacheContext(const ANNSCacheContext&) = delete;
+        ANNSCacheContext& operator=(const ANNSCacheContext&) = delete;
     };
 }

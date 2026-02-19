@@ -5,9 +5,9 @@
 #include <algorithm>
 #include <cassert>
 #include <mutex>
+#include <unordered_map>
 #include <utility>
 
-#include <boost/unordered/concurrent_flat_map.hpp>
 #include <faiss/IndexHNSW.h>
 #include <faiss/IndexIDMap.h>
 
@@ -28,7 +28,7 @@ namespace aker
             /**
              * @brief Constructs a single HNSW generation.
              */
-            ApproxFilterHnsw2(ann_cache_config_t parameter_info, faiss::MetricType metric) noexcept;
+            ApproxFilterHnsw2(anns_cache_config_t parameter_info, faiss::MetricType metric) noexcept;
 
             /**
              * @brief Adds a representative vector into this generation.
@@ -75,16 +75,16 @@ namespace aker
             static constexpr int k_hnsw_ef_search = 8;
             static constexpr int k_hnsw_ef_construction = 16;
 
-            SpinMutex                                   filter_lock_;
-            ann_cache_config_t                    parameter_;
+            InternalMutex                               filter_lock_;
+            anns_cache_config_t                    parameter_;
 
             size_t                                      add_count_;
-            boost::concurrent_flat_map<vector_id_t, bool> reg_map_;
+            std::unordered_map<vector_id_t, bool>        reg_map_;
             std::unique_ptr<faiss::IndexIDMap>          hnsw_index_wrapper_;
         };
 
         ApproxFilterHnsw2::ApproxFilterHnsw2(
-            ann_cache_config_t parameter_info,
+            anns_cache_config_t parameter_info,
             faiss::MetricType metric) noexcept
             : filter_lock_(),
               parameter_(parameter_info),
@@ -107,16 +107,10 @@ namespace aker
         {
             /* Registers the ID and inserts the float-converted vector into the FAISS index.
              */
-            std::lock_guard<SpinMutex> guard(filter_lock_);
+            std::lock_guard<InternalMutex> guard(filter_lock_);
 
-            bool inserted = reg_map_.try_emplace_or_visit(
-                query.vector_id,
-                true,
-                [&](const auto& /*pair*/)
-                {
-                    /* Existing ID: do not insert again. */
-                });
-
+            const auto emplace_result = reg_map_.emplace(query.vector_id, true);
+            const bool inserted = emplace_result.second;
             if (!inserted)
             {
                 assert(false);
@@ -144,24 +138,18 @@ namespace aker
         {
             /* Applies tombstone deletes by removing IDs from the registration map.
              */
-            std::lock_guard<SpinMutex> guard(filter_lock_);
+            std::lock_guard<InternalMutex> guard(filter_lock_);
 
             int deleted = 0;
 
             for (vector_id_t vector_id : vector_id_list)
             {
-                int visited = reg_map_.visit(
-                    vector_id,
-                    [&](const auto& /*pair*/)
-                    {
-                        /* Presence check only. */
-                    });
-
-                if (visited == 0)
+                const auto it = reg_map_.find(vector_id);
+                if (it == reg_map_.end())
                     continue;
 
-                reg_map_.erase(vector_id);
-                deleted++;
+                reg_map_.erase(it);
+                ++deleted;
             }
 
             if (reg_map_.size() == 0)
@@ -178,7 +166,7 @@ namespace aker
             faiss::idx_t* labels) noexcept
         {
             /* Delegates to FAISS search. */
-            std::lock_guard<SpinMutex> guard(filter_lock_);
+            std::lock_guard<InternalMutex> guard(filter_lock_);
             hnsw_index_wrapper_->search(1, x, k, distances, labels);
         }
 
@@ -186,30 +174,21 @@ namespace aker
         ApproxFilterHnsw2::isRegistered(vector_id_t vector_id) noexcept
         {
             /* Checks tombstone map membership. */
-            std::lock_guard<SpinMutex> guard(filter_lock_);
-
-            bool registered = false;
-            reg_map_.visit(
-                vector_id,
-                [&](const auto& /*pair*/)
-                {
-                    registered = true;
-                });
-
-            return registered;
+            std::lock_guard<InternalMutex> guard(filter_lock_);
+            return (reg_map_.find(vector_id) != reg_map_.end());
         }
 
         size_t
         ApproxFilterHnsw2::getRepresentativeVectorNumber() noexcept
         {
-            std::lock_guard<SpinMutex> guard(filter_lock_);
+            std::lock_guard<InternalMutex> guard(filter_lock_);
             return reg_map_.size();
         }
 
         size_t
         ApproxFilterHnsw2::getAddedCounts() noexcept
         {
-            std::lock_guard<SpinMutex> guard(filter_lock_);
+            std::lock_guard<InternalMutex> guard(filter_lock_);
             return add_count_;
         }
 
@@ -217,7 +196,7 @@ namespace aker
         ApproxFilterHnsw2::clear() noexcept
         {
             /* Resets this generation completely. */
-            std::lock_guard<SpinMutex> guard(filter_lock_);
+            std::lock_guard<InternalMutex> guard(filter_lock_);
 
             reg_map_.clear();
             hnsw_index_wrapper_->reset();
@@ -228,7 +207,7 @@ namespace aker
         ApproxFilterHnsw2::getStatusText() noexcept
         {
             /* Builds a lightweight status summary. */
-            std::lock_guard<SpinMutex> guard(filter_lock_);
+            std::lock_guard<InternalMutex> guard(filter_lock_);
 
             std::string status_string;
             status_string += "ApproxFilterHnsw2 Status:\n";
@@ -241,7 +220,7 @@ namespace aker
 
     } // namespace detail
 
-    ApproxFilterDualHNSW2::ApproxFilterDualHNSW2(ann_cache_config_t parameter_info) noexcept
+    ApproxFilterDualHNSW2::ApproxFilterDualHNSW2(anns_cache_config_t parameter_info) noexcept
         : parameter_(parameter_info),
           filter_lock_(),
           filters_()
@@ -279,7 +258,7 @@ namespace aker
     {
         /* Adds the representative vector into the primary generation.
          */
-        std::lock_guard<SpinMutex> guard(filter_lock_);
+        std::lock_guard<InternalMutex> guard(filter_lock_);
         filters_[0]->addVector(query);
 
         AKER_LOG_DEBUG << "[ApproxFilter] added representative: vector_id=" << query.vector_id;
@@ -290,7 +269,7 @@ namespace aker
     {
         /* Applies tombstone deletes to both generations.
          */
-        std::lock_guard<SpinMutex> guard(filter_lock_);
+        std::lock_guard<InternalMutex> guard(filter_lock_);
 
         int total_deleted = 0;
         for (size_t i = 0; i < k_num_filters; i++)
@@ -315,7 +294,7 @@ namespace aker
          *
          * The arrays are expected to have size `k * k_num_filters`.
          */
-        std::lock_guard<SpinMutex> guard(filter_lock_);
+        std::lock_guard<InternalMutex> guard(filter_lock_);
 
         const size_t search_number = static_cast<size_t>(k) * k_num_filters;
 
@@ -396,7 +375,7 @@ namespace aker
     {
         /* Clears the standby generation and swaps roles.
          */
-        std::lock_guard<SpinMutex> guard(filter_lock_);
+        std::lock_guard<InternalMutex> guard(filter_lock_);
 
         const size_t before_repr = filters_[0]->getRepresentativeVectorNumber();
         const size_t before_added = filters_[0]->getAddedCounts();

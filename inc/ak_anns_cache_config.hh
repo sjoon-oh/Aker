@@ -1,5 +1,5 @@
-#ifndef AKER_COMMONS_H
-#define AKER_COMMONS_H
+#ifndef AKER_ANNS_CACHE_CONFIG_HH
+#define AKER_ANNS_CACHE_CONFIG_HH
 
 #include <cstddef>
 #include <cstdint>
@@ -54,7 +54,7 @@ namespace aker
     /**
      * @brief Project-wide configuration used to construct the cache.
      */
-    struct ANNCacheConfig
+    struct ANNSCacheConfig
     {
         VectorFormatConfig vector_format;
         CacheCapacityConfig capacity;
@@ -66,7 +66,7 @@ namespace aker
     /**
      * @brief Backward-compatible typedef used by the cache constructors.
      */
-    using ann_cache_config_t = ANNCacheConfig;
+    using anns_cache_config_t = ANNSCacheConfig;
 }
 
-#endif
+#endif // AKER_ANNS_CACHE_CONFIG_HH

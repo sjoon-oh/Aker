@@ -13,13 +13,13 @@
 namespace aker
 {
     /**
-     * @brief Telemetry and latency statistics for ANNCache2.
+     * @brief Telemetry and latency statistics for ANNSCache.
      *
      * This module is intentionally designed for low overhead on the hot path:
      * - Latency series are indexed by a fixed enum instead of a string-keyed map.
      * - Export walks the static key list and writes one CSV per key.
      */
-    class ANNCacheStats
+    class ANNSCacheStats
     {
     public:
         /**
@@ -49,16 +49,16 @@ namespace aker
          */
         enum class LatencyMetric : std::uint32_t
         {
-            k_sim_get_cache_entry = 0,
+            k_get_cache_entry = 0,
             k_insert_cache_entry,
             k_link_cache_entry,
             k_insert_write_log_entry,
             k_mark_vector_deleted,
-            k_consume_aged_write_log_entry,
+            k_process_write_log_entries,
 
-            k_sim_get_cache_entry_step_1,
-            k_sim_get_cache_entry_step_2,
-            k_sim_get_cache_entry_step_3,
+            k_get_cache_entry_step_1,
+            k_get_cache_entry_step_2,
+            k_get_cache_entry_step_3,
 
             k_insert_cache_entry_step_1,
             k_insert_cache_entry_step_2,
@@ -69,14 +69,14 @@ namespace aker
             k_insert_write_log_entry_step_3,
             k_insert_write_log_entry_step_4,
 
-            k_evict_vectors_step_1,
-            k_evict_vectors_step_2,
-            k_evict_vectors_step_3,
+            k_evict_cache_entries_step_1,
+            k_evict_cache_entries_step_2,
+            k_evict_cache_entries_step_3,
 
-            k_incr_batch_update_write_log_step_1,
-            k_incr_batch_update_write_log_step_2,
-            k_incr_batch_update_write_log_step_3,
-            k_incr_batch_update_write_log_step_4,
+            k_write_log_slow_path_step_1,
+            k_write_log_slow_path_step_2,
+            k_write_log_slow_path_step_3,
+            k_write_log_slow_path_step_4,
 
             k_count,
         };
@@ -144,12 +144,12 @@ namespace aker
         /**
          * @brief Constructs the stats object and initializes all series.
          */
-        ANNCacheStats() noexcept;
+        ANNSCacheStats() noexcept;
 
         /**
          * @brief Destructor.
          */
-        virtual ~ANNCacheStats() noexcept = default;
+        virtual ~ANNSCacheStats() noexcept = default;
 
         /**
          * @brief Clears all telemetry counters and buffers.
@@ -230,5 +230,5 @@ namespace aker
     /**
      * @brief Legacy alias used across the cache layer.
      */
-    using ann_cache_stats_t = ANNCacheStats;
+    using anns_cache_stats_t = ANNSCacheStats;
 }

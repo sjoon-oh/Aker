@@ -4,16 +4,16 @@
 #include <limits>
 #include <vector>
 
-#include "core/ak_ann_cache2_similarity_engine.hh"
-#include "core/ak_ann_cache2_entry_store.hh"
+#include "core/ak_anns_cache_similarity_engine.hh"
+#include "core/ak_anns_cache_entry_store.hh"
 #include "ak_logger.hh"
 #include "utils/ak_malloc_ptr.hh"
 
 namespace aker
 {
-    ANNCache2SimilarityEngine::ANNCache2SimilarityEngine(
-        ANNCache2Context* context,
-        ANNCache2EntryStore* entry_store) noexcept
+    ANNSCacheSimilarityEngine::ANNSCacheSimilarityEngine(
+        ANNSCacheContext* context,
+        ANNSCacheEntryStore* entry_store) noexcept
         : context_(context),
           entry_store_(entry_store)
     {
@@ -22,7 +22,7 @@ namespace aker
     }
 
     bool
-    ANNCache2SimilarityEngine::handleInvalidCEntryLocked(result_cache_entry_t* entry) noexcept
+    ANNSCacheSimilarityEngine::validateCacheEntryLocked(anns_cache_entry_t* entry) noexcept
     {
         /* Validates an entry by pushing invalid vectors to the tail.
          * If the number of valid vectors falls below intopk, the entry becomes invalid.
@@ -76,12 +76,13 @@ namespace aker
         return is_valid;
     }
 
-    result_cache_entry_t*
-    ANNCache2SimilarityEngine::simGetCEntryLocked(
+    anns_cache_entry_t*
+    ANNSCacheSimilarityEngine::getCacheEntryLocked(
         vector_view_t query_vector_data,
         bool& similar_entry,
         bool& is_invalid,
-        distance_function_t distance_function) noexcept
+        distance_function_t distance_function,
+        const float* query_vector_float) noexcept
     {
         /* Performs exact-hit first and then sim-hit using the approximate filter.
          * The returned entry is always a deep copy (caller-owned) on hit.
@@ -91,17 +92,17 @@ namespace aker
         similar_entry = false;
         is_invalid = false;
 
-        result_cache_entry_t* entry = entry_store_->getCEntry(query_vector_data.vector_id);
+        anns_cache_entry_t* entry = entry_store_->getCacheEntry(query_vector_data.vector_id);
 
         if (entry != nullptr)
         {
-            bool is_valid = handleInvalidCEntryLocked(entry);
+            bool is_valid = validateCacheEntryLocked(entry);
             if (!is_valid)
             {
                 is_invalid = true;
                 entry = nullptr;
 
-                AKER_LOG_DEBUG << "[ANNCacheSimilarity] exact hit invalidated: query_id=" << query_vector_data.vector_id;
+                AKER_LOG_DEBUG << "[ANNSCacheSimilarity] exact hit invalidated: query_id=" << query_vector_data.vector_id;
             }
             else
             {
@@ -122,11 +123,11 @@ namespace aker
                         entry->thresh = entry->min_distance;
                 }
 
-                AKER_LOG_DEBUG << "[ANNCacheSimilarity] exact hit: query_id=" << query_vector_data.vector_id
+                AKER_LOG_DEBUG << "[ANNSCacheSimilarity] exact hit: query_id=" << query_vector_data.vector_id
                               << " root_id=" << entry->query_vector->getVectorId()
                               << " linked_hit=" << static_cast<int>(linked_hit);
 
-                result_cache_entry_t* copy_entry = entry_store_->copyCacheEntry(entry);
+                anns_cache_entry_t* copy_entry = entry_store_->copyCacheEntry(entry);
                 return copy_entry;
             }
         }
@@ -136,21 +137,31 @@ namespace aker
         static constexpr faiss::idx_t k_search_per_filter = 1;
         static constexpr size_t k_candidate_count = 2;
 
-        MallocPtr<float> query_vector = makeMallocPtr<float>(query_vector_data.vector_dim);
+        /* Convert the query vector outside the critical section when possible.
+         * The caller may provide a pre-converted float array.
+         */
+        const float* faiss_query_vector = query_vector_float;
+        MallocPtr<float> owned_query_vector;
+        if (faiss_query_vector == nullptr)
+        {
+            owned_query_vector = makeMallocPtr<float>(query_vector_data.vector_dim);
+
+            bool convert_success = query_vector_data.conversion_function(
+                query_vector_data.vector_data,
+                query_vector_data.vector_data_size,
+                query_vector_data.vector_dim,
+                owned_query_vector.get(),
+                query_vector_data.aux);
+            (void)convert_success;
+
+            faiss_query_vector = owned_query_vector.get();
+        }
 
         std::array<float, k_candidate_count> distances{};
         std::array<faiss::idx_t, k_candidate_count> labels{};
 
-        bool convert_success = query_vector_data.conversion_function(
-            query_vector_data.vector_data,
-            query_vector_data.vector_data_size,
-            query_vector_data.vector_dim,
-            query_vector.get(),
-            query_vector_data.aux);
-        (void)convert_success;
-
         context_->apprx_filter->searchSimilarVectors(
-            query_vector.get(),
+            faiss_query_vector,
             k_search_per_filter,
             distances.data(),
             labels.data());
@@ -165,11 +176,11 @@ namespace aker
                 continue;
 
             vector_id_t vector_id = static_cast<vector_id_t>(labels[i]);
-            result_cache_entry_t* found_entry = entry_store_->getCEntry(vector_id);
+            anns_cache_entry_t* found_entry = entry_store_->getCacheEntry(vector_id);
             if (found_entry == nullptr)
                 continue;
 
-            bool is_valid = handleInvalidCEntryLocked(found_entry);
+            bool is_valid = validateCacheEntryLocked(found_entry);
             if (!is_valid)
             {
                 last_candidate_invalid = true;
@@ -192,7 +203,7 @@ namespace aker
 
             if (query_distance < thresh)
             {
-                AKER_LOG_DEBUG << "[ANNCacheSimilarity] approx hit: query_id=" << query_vector_data.vector_id
+                AKER_LOG_DEBUG << "[ANNSCacheSimilarity] approx hit: query_id=" << query_vector_data.vector_id
                               << " repr_id=" << found_entry->query_vector->getVectorId()
                               << " query_distance=" << query_distance
                               << " thresh=" << thresh;
@@ -221,7 +232,7 @@ namespace aker
         context_->stats.cache_miss++;
         context_->stats.recordHitHistory();
 
-        AKER_LOG_DEBUG << "[ANNCacheSimilarity] cache miss: query_id=" << query_vector_data.vector_id
+        AKER_LOG_DEBUG << "[ANNSCacheSimilarity] cache miss: query_id=" << query_vector_data.vector_id
                       << " last_candidate_invalid=" << static_cast<int>(last_candidate_invalid);
 
         context_->stats.approx_added_counts.push_back(context_->apprx_filter->getAddedCounts());

@@ -12,9 +12,9 @@
 
 #include <faiss/Index.h>
 
-#include "ak_ann_cache_config.hh"
+#include "ak_anns_cache_config.hh"
 #include "ak_vector_slot.hh"
-#include "utils/ak_spin_mutex.hh"
+#include "utils/ak_lock.hh"
 
 namespace aker
 {
@@ -85,7 +85,7 @@ namespace aker
         /**
          * @brief Constructs a dual filter instance.
          */
-        explicit ApproxFilterDualHNSW2(ann_cache_config_t parameter_info) noexcept;
+        explicit ApproxFilterDualHNSW2(anns_cache_config_t parameter_info) noexcept;
 
         /**
          * @brief Destroys the dual filter instance.
@@ -149,8 +149,8 @@ namespace aker
     private:
         static constexpr size_t k_num_filters = 2;
 
-        ann_cache_config_t parameter_;
-        SpinMutex                filter_lock_;
+        anns_cache_config_t parameter_;
+        InternalMutex            filter_lock_;
 
         std::array<std::unique_ptr<detail::ApproxFilterHnsw2>, k_num_filters> filters_;
 

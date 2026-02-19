@@ -198,7 +198,7 @@ namespace aker
     {
         /* Insert a new log node (one-copy) and link it to the tail.
          */
-        std::lock_guard<SpinMutex> log_guard(log_lock_);
+        std::lock_guard<InternalMutex> log_guard(log_lock_);
 
         latest_epoch_++;
 
@@ -257,7 +257,7 @@ namespace aker
             return;
         }
 
-        std::lock_guard<SpinMutex> log_guard(log_lock_);
+        std::lock_guard<InternalMutex> log_guard(log_lock_);
 
         if (round_robin_location_.find(cache_entry) != round_robin_location_.end())
         {
@@ -275,7 +275,7 @@ namespace aker
     {
         /* Rotate RR list and return front element.
          */
-        std::lock_guard<SpinMutex> log_guard(log_lock_);
+        std::lock_guard<InternalMutex> log_guard(log_lock_);
 
         if (round_robin_list_.empty())
         {
@@ -302,7 +302,7 @@ namespace aker
             return false;
         }
 
-        std::lock_guard<SpinMutex> log_guard(log_lock_);
+        std::lock_guard<InternalMutex> log_guard(log_lock_);
 
         const auto it = round_robin_location_.find(cache_entry);
         if (it == round_robin_location_.end())
@@ -320,7 +320,7 @@ namespace aker
     {
         /* Return the current tail with a retained reference.
          */
-        std::lock_guard<SpinMutex> log_guard(log_lock_);
+        std::lock_guard<InternalMutex> log_guard(log_lock_);
 
         if (log_tail_ == nullptr)
         {
@@ -334,7 +334,7 @@ namespace aker
     void
     RiskAwareWriteLog::releaseCheckpoint(write_log_checkpoint_t checkpoint) noexcept
     {
-        std::lock_guard<SpinMutex> log_guard(log_lock_);
+        std::lock_guard<InternalMutex> log_guard(log_lock_);
         releaseNodeLocked(checkpoint);
     }
 
@@ -348,7 +348,7 @@ namespace aker
             return;
         }
 
-        std::lock_guard<SpinMutex> log_guard(log_lock_);
+        std::lock_guard<InternalMutex> log_guard(log_lock_);
 
         releaseNodeLocked(checkpoint_slot);
         checkpoint_slot = new_checkpoint;
@@ -359,7 +359,7 @@ namespace aker
     {
         /* Compute distance from checkpoint epoch to latest epoch.
          */
-        std::lock_guard<SpinMutex> log_guard(log_lock_);
+        std::lock_guard<InternalMutex> log_guard(log_lock_);
 
         if (log_head_ == nullptr || log_tail_ == nullptr)
         {
@@ -398,7 +398,7 @@ namespace aker
         epoch_t end_epoch = 0;
 
         {
-            std::lock_guard<SpinMutex> log_guard(log_lock_);
+            std::lock_guard<InternalMutex> log_guard(log_lock_);
 
             write_log_checkpoint_t start_node = (scan_start != nullptr) ? scan_start : log_head_;
             if (start_node == nullptr)
@@ -474,7 +474,7 @@ namespace aker
         }
 
         {
-            std::lock_guard<SpinMutex> log_guard(log_lock_);
+            std::lock_guard<InternalMutex> log_guard(log_lock_);
 
             /* Release scan-window pins first.
              */
@@ -504,7 +504,7 @@ namespace aker
     {
         /* Trim unreferenced head entries while preserving tail.
          */
-        std::lock_guard<SpinMutex> log_guard(log_lock_);
+        std::lock_guard<InternalMutex> log_guard(log_lock_);
 
         const size_t before = log_entry_count_;
 
@@ -551,7 +551,7 @@ namespace aker
     {
         /* Clear entries, RR structures, and risk stats.
          */
-        std::lock_guard<SpinMutex> log_guard(log_lock_);
+        std::lock_guard<InternalMutex> log_guard(log_lock_);
 
         write_log_checkpoint_t node = log_head_;
         while (node != nullptr)
@@ -584,7 +584,7 @@ namespace aker
     {
         /* Update risk model for a newly inserted representative cache entry.
          */
-        std::lock_guard<SpinMutex> log_guard(log_lock_);
+        std::lock_guard<InternalMutex> log_guard(log_lock_);
 
         assert(risk_factor >= 0.0);
         assert(risk_factor <= 1.0);
@@ -601,7 +601,7 @@ namespace aker
     {
         /* Update risk model when a representative cache entry is evicted.
          */
-        std::lock_guard<SpinMutex> log_guard(log_lock_);
+        std::lock_guard<InternalMutex> log_guard(log_lock_);
 
         assert(risk_factor >= 0.0);
         assert(risk_factor <= 1.0);
@@ -623,7 +623,7 @@ namespace aker
     {
         /* Consume unseen distance after a checkpoint advances.
          */
-        std::lock_guard<SpinMutex> log_guard(log_lock_);
+        std::lock_guard<InternalMutex> log_guard(log_lock_);
 
         risk_score_.total_unseen -= static_cast<double>(unseen_distance);
         if (risk_score_.total_unseen < 0.0)
@@ -639,14 +639,14 @@ namespace aker
     bool
     RiskAwareWriteLog::shouldRunSlowPath() noexcept
     {
-        std::lock_guard<SpinMutex> log_guard(log_lock_);
+        std::lock_guard<InternalMutex> log_guard(log_lock_);
         return (allowed_risk_ < risk_score_.current_risk);
     }
 
     void
     RiskAwareWriteLog::recordRefresh() noexcept
     {
-        std::lock_guard<SpinMutex> log_guard(log_lock_);
+        std::lock_guard<InternalMutex> log_guard(log_lock_);
         refresh_count_++;
     }
 
@@ -655,7 +655,7 @@ namespace aker
     {
         /* Build a stable snapshot of metrics for telemetry export.
          */
-        std::lock_guard<SpinMutex> log_guard(log_lock_);
+        std::lock_guard<InternalMutex> log_guard(log_lock_);
 
         WriteLogMetrics metrics;
         metrics.log_entry_count = log_entry_count_;
@@ -686,7 +686,7 @@ namespace aker
     {
         /* Build a human-readable status snapshot.
          */
-        std::lock_guard<SpinMutex> log_guard(log_lock_);
+        std::lock_guard<InternalMutex> log_guard(log_lock_);
 
         std::ostringstream oss;
         oss << "WriteLog status: total elements (" << log_entry_count_ << ")\n";
@@ -776,7 +776,7 @@ namespace aker
     {
         /* Release pinned scan nodes.
          */
-        std::lock_guard<SpinMutex> log_guard(log_lock_);
+        std::lock_guard<InternalMutex> log_guard(log_lock_);
         for (write_log_checkpoint_t node : nodes)
         {
             releaseNodeLocked(node);

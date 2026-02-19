@@ -3,7 +3,7 @@
 //
 // Helper routines for copying VectorSlot payloads.
 // These helpers intentionally copy only the basic fields (id/version + raw data)
-// to preserve the existing ANNCache2 behaviour.
+// to preserve the existing ANNSCache behaviour.
 
 #ifndef AKER_CACHE_VECTOR_COPY_HH
 #define AKER_CACHE_VECTOR_COPY_HH

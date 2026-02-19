@@ -10,7 +10,7 @@
 #include <vector>
 
 #include "ak_vector_slot.hh"
-#include "utils/ak_spin_mutex.hh"
+#include "utils/ak_lock.hh"
 
 namespace aker
 {
@@ -318,7 +318,7 @@ namespace aker
         const size_t scan_thresh_;
         const double allowed_risk_;
 
-        SpinMutex log_lock_;
+        InternalMutex log_lock_;
 
         epoch_t latest_epoch_{0};
         size_t log_entry_count_{0};

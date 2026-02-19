@@ -101,7 +101,7 @@ namespace aker
         AKER_LOG_INFO << "  distance_metric=" << distance_type_str;
     }
 
-    ann_cache_config_t
+    anns_cache_config_t
     ParameterParser::getParameter() const noexcept
     {
         return parameter;

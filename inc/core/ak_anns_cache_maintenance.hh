@@ -3,47 +3,48 @@
 #include <vector>
 
 #include "ak_approx_filter.hh"
-#include "core/ak_ann_cache2_context.hh"
+#include "core/ak_anns_cache_context.hh"
 
 namespace aker
 {
-    class ANNCache2EntryStore;
+    class ANNSCacheEntryStore;
 
     /**
-     * @brief Maintenance module for ANNCache2.
+     * @brief Maintenance module for ANNSCache.
      *
      * This module contains insertion/eviction and write-log maintenance paths.
      */
-    class ANNCache2Maintenance
+    class ANNSCacheMaintenance
     {
     public:
         /**
          * @brief Constructs the module with the shared cache context.
          */
-        ANNCache2Maintenance(ANNCache2Context* context, ANNCache2EntryStore* entry_store) noexcept;
+        ANNSCacheMaintenance(ANNSCacheContext* context, ANNSCacheEntryStore* entry_store) noexcept;
 
         /**
          * @brief Inserts a prepared entry into the cache.
          */
-        bool insertCEntryLocked(
+        bool insertCacheEntryLocked(
             vector_id_t vector_id,
-            result_cache_entry_t* entry,
+            anns_cache_entry_t* entry,
             vector_view_t query_vector_data) noexcept;
 
         /**
          * @brief Consumes aged write-log entries and triggers slow-path updates.
          */
-        void consumeAgedWLEntryLocked(
+        void processWriteLogEntriesLocked(
             distance_function_t distance_function,
             result_conversion_function_t result_conversion_function) noexcept;
 
         /**
          * @brief Inserts a write-log entry and runs fast/slow maintenance.
          */
-        void insertWLEntry3Locked(
+        void insertWriteLogEntryLocked(
             vector_view_t write_vector,
             distance_function_t distance_function,
-            result_conversion_function_t result_conversion_function) noexcept;
+            result_conversion_function_t result_conversion_function,
+            const float* write_vector_float) noexcept;
 
         /**
          * @brief Marks a vector as deleted in the vector pool.
@@ -74,24 +75,25 @@ namespace aker
         /**
          * @brief Evicts entries using the configured eviction strategy.
          */
-        void evictVectorsLocked(size_t to_evicts, std::vector<vector_id_t>& evicted_list) noexcept;
+        void evictCacheEntriesLocked(size_t to_evicts, std::vector<vector_id_t>& evicted_list) noexcept;
 
         /**
          * @brief Fast-path write-log update that opportunistically improves a nearby entry.
          */
-        void updateWLEntryFastPathLocked(
+        void updateWriteLogFastPathLocked(
             vector_view_t write_vector,
             distance_function_t distance_function,
-            result_conversion_function_t result_conversion_function) noexcept;
+            result_conversion_function_t result_conversion_function,
+            const float* write_vector_float) noexcept;
 
         /**
          * @brief Slow-path write-log update (sweep + top-k refresh).
          */
-        void incrBatchUpdateWLog2Locked(
+        void runWriteLogSlowPathLocked(
             distance_function_t distance_function,
             result_conversion_function_t result_conversion_function) noexcept;
 
-        ANNCache2Context*    context_;
-        ANNCache2EntryStore* entry_store_;
+        ANNSCacheContext*    context_;
+        ANNSCacheEntryStore* entry_store_;
     };
 }
