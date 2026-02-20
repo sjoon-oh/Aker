@@ -109,6 +109,7 @@ namespace aker
         cache_exact_hit_ratios.reserve(k_default_history_reserve);
         approx_added_counts.reserve(k_default_history_reserve);
         approx_representative_counts.reserve(k_default_history_reserve);
+        global_thresh_history.reserve(k_default_history_reserve);
 
         clear();
     }
@@ -122,6 +123,7 @@ namespace aker
         cache_invalid_detect = 0;
         cache_evict = 0;
         cache_sim_hit = 0;
+        cache_dropout = 0;
 
         for (LatencySeries& series : latency_series)
         {
@@ -132,6 +134,7 @@ namespace aker
         cache_exact_hit_ratios.clear();
         approx_added_counts.clear();
         approx_representative_counts.clear();
+        global_thresh_history.clear();
         cache_history.clear();
         history_sequence = 0;
     }

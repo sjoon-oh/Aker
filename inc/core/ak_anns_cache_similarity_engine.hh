@@ -1,11 +1,14 @@
 #pragma once
 
+#include <vector>
+
 #include "ak_approx_filter.hh"
 #include "core/ak_anns_cache_context.hh"
 
 namespace aker
 {
     class ANNSCacheEntryStore;
+    class VectorSlot;
 
     /**
      * @brief SimilarityEngine module for ANNSCache.
@@ -38,5 +41,10 @@ namespace aker
     private:
         ANNSCacheContext*  context_;
         ANNSCacheEntryStore* entry_store_;
+
+        /* Scratch buffer reused under the global cache lock.
+         * This avoids per-request heap allocations in validateCacheEntryLocked.
+         */
+        std::vector<VectorSlot*> reorder_scratch_;
     };
 }

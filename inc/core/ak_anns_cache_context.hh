@@ -76,6 +76,18 @@ namespace aker
         std::uint32_t try_read_count;
 
         /**
+         * @brief Distance function instance used by Potluck tuning at put().
+         *
+         * Potluck requires a distance function when updating the global threshold during insert.
+         */
+        distance_function_t inst_distance_function;
+
+        /**
+         * @brief Whether inst_distance_function was initialized.
+         */
+        bool has_distance_function;
+
+        /**
          * @brief Global cache lock.
          */
         SpinMutex cache_lock;

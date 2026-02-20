@@ -9,10 +9,10 @@ namespace aker
     /**
      * @brief Distance metric selection.
      */
-    enum class distance_type_t : std::uint8_t
+    enum class distance_metric_t : std::uint8_t
     {
-        DISTANCE_TYPE_L2 = 0,
-        DISTANCE_TYPE_IP
+        DISTANCE_METRIC_L2 = 0,
+        DISTANCE_METRIC_IP
     };
 
     /**
@@ -20,8 +20,8 @@ namespace aker
      */
     struct VectorFormatConfig
     {
-        std::uint32_t vector_dim{0};
-        size_t vector_data_size{0};
+        std::uint32_t dimension{0};
+        size_t vector_in_bytes{0};
     };
 
     /**
@@ -29,10 +29,16 @@ namespace aker
      */
     struct CacheCapacityConfig
     {
-        size_t slot_pool_size{0};
-        size_t slot_list_size{0};
-        size_t vector_in_topk{0};
-        size_t vector_extras{0};
+        size_t pool_size{0};
+        size_t in_topk{0};
+        size_t top_delta{0};
+
+        /**
+         * @brief Returns the total number of stored neighbors per entry.
+         *
+         * This replaces the legacy `slot_list_size` field.
+         */
+        size_t getSlotListSize() const noexcept { return in_topk + top_delta; }
     };
 
     /**
@@ -40,11 +46,20 @@ namespace aker
      */
     struct AlgorithmTuningConfig
     {
-        bool similar_match{false};
+        /* Global similarity threshold used by Proximity/Potluck modes.
+         *
+         * - Proximity Mode: fixed global threshold (no adaptive updates)
+         * - Potluck Mode  : tuned global threshold (updated at put)
+         * - Standard Mode : unused
+         */
+        float global_thresh{0.0f};
 
-        bool use_fixed_thresh{false};
-        float fixed_thresh{0.0f};
-        float start_thresh{0.0f};
+        /* Dropout rate for Potluck mode.
+         *
+         * Potluck uses random dropout on sim-hit to force revalidation.
+         * This value is interpreted as a percentage in [0, 100].
+         */
+        float dropout{0.0f};
 
         float risk_thresh{0.0f};
         float alpha_tighten{0.0f};
@@ -60,7 +75,7 @@ namespace aker
         CacheCapacityConfig capacity;
         AlgorithmTuningConfig tuning;
 
-        distance_type_t distance_type{distance_type_t::DISTANCE_TYPE_L2};
+        distance_metric_t distance_metric{distance_metric_t::DISTANCE_METRIC_L2};
     };
 
     /**

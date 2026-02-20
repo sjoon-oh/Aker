@@ -76,23 +76,20 @@ void akerImportAnnsCacheConfig(char* path, anns_cache_parameter_c_t* parameter)
     aker::ParameterParser parser(file_path);
     aker::anns_cache_config_t parameter_info = parser.getParameter();
 
-    parameter->vector_dim = parameter_info.vector_format.vector_dim;
-    parameter->vector_pool_size = parameter_info.capacity.slot_pool_size;
-    parameter->vector_list_size = parameter_info.capacity.slot_list_size;
-    parameter->vector_data_size = parameter_info.vector_format.vector_data_size;
-    parameter->vector_intopk = parameter_info.capacity.vector_in_topk;
-    parameter->vector_extras = parameter_info.capacity.vector_extras;
+    parameter->vector_format.dimension = parameter_info.vector_format.dimension;
+    parameter->vector_format.vector_in_bytes = parameter_info.vector_format.vector_in_bytes;
 
-    parameter->similar_match = parameter_info.tuning.similar_match;
-    parameter->use_fixed_thresh = parameter_info.tuning.use_fixed_thresh;
-    parameter->fixed_thresh = parameter_info.tuning.fixed_thresh;
-    parameter->start_thresh = parameter_info.tuning.start_thresh;
+    parameter->capacity.pool_size = parameter_info.capacity.pool_size;
+    parameter->capacity.in_topk = parameter_info.capacity.in_topk;
+    parameter->capacity.top_delta = parameter_info.capacity.top_delta;
 
-    parameter->risk_thresh = parameter_info.tuning.risk_thresh;
-    parameter->alpha_tighten = parameter_info.tuning.alpha_tighten;
-    parameter->alpha_loosen = parameter_info.tuning.alpha_loosen;
+    parameter->tuning.global_thresh = parameter_info.tuning.global_thresh;
+    parameter->tuning.dropout = parameter_info.tuning.dropout;
+    parameter->tuning.risk_thresh = parameter_info.tuning.risk_thresh;
+    parameter->tuning.alpha_tighten = parameter_info.tuning.alpha_tighten;
+    parameter->tuning.alpha_loosen = parameter_info.tuning.alpha_loosen;
 
-    parameter->distance_type = static_cast<uint8_t>(parameter_info.distance_type);
+    parameter->distance_metric = static_cast<uint8_t>(parameter_info.distance_metric);
 }
 
 bool akerDefaultConversionFunction(void* src, size_t src_size, size_t dim, void* dst, uint8_t* aux)
@@ -111,42 +108,40 @@ anns_cache_c_wrapper_t* akerCreateAnnsCache(anns_cache_parameter_c_t parameter)
 {
     /* Convert C config struct to C++ config struct. */
     aker::anns_cache_config_t parameter_info;
-    parameter_info.vector_format.vector_dim = parameter.vector_dim;
-    parameter_info.capacity.slot_pool_size = parameter.vector_pool_size;
-    parameter_info.capacity.slot_list_size = parameter.vector_list_size;
-    parameter_info.vector_format.vector_data_size = parameter.vector_data_size;
-    parameter_info.capacity.vector_in_topk = parameter.vector_intopk;
-    parameter_info.capacity.vector_extras = parameter.vector_extras;
+    parameter_info.vector_format.dimension = parameter.vector_format.dimension;
+    parameter_info.vector_format.vector_in_bytes = parameter.vector_format.vector_in_bytes;
 
-    parameter_info.tuning.similar_match = parameter.similar_match;
-    parameter_info.tuning.use_fixed_thresh = parameter.use_fixed_thresh;
-    parameter_info.tuning.fixed_thresh = parameter.fixed_thresh;
-    parameter_info.tuning.start_thresh = parameter.start_thresh;
+    parameter_info.capacity.pool_size = parameter.capacity.pool_size;
+    parameter_info.capacity.in_topk = parameter.capacity.in_topk;
+    parameter_info.capacity.top_delta = parameter.capacity.top_delta;
 
-    parameter_info.tuning.risk_thresh = parameter.risk_thresh;
-    parameter_info.tuning.alpha_tighten = parameter.alpha_tighten;
-    parameter_info.tuning.alpha_loosen = parameter.alpha_loosen;
-    parameter_info.distance_type = static_cast<aker::distance_type_t>(parameter.distance_type);
+    parameter_info.tuning.global_thresh = parameter.tuning.global_thresh;
+    parameter_info.tuning.dropout = parameter.tuning.dropout;
+    parameter_info.tuning.risk_thresh = parameter.tuning.risk_thresh;
+    parameter_info.tuning.alpha_tighten = parameter.tuning.alpha_tighten;
+    parameter_info.tuning.alpha_loosen = parameter.tuning.alpha_loosen;
+
+    parameter_info.distance_metric = static_cast<aker::distance_metric_t>(parameter.distance_metric);
 
     /* Create wrapper and cache instance. */
     anns_cache_c_wrapper_t* wrapper = new anns_cache_c_wrapper_t;
     wrapper->anns_cache = asChar(new aker::ANNSCache(parameter_info));
 
     /* Echo the resolved parameters back to the wrapper. */
-    wrapper->parameter.vector_dim = parameter_info.vector_format.vector_dim;
-    wrapper->parameter.vector_pool_size = parameter_info.capacity.slot_pool_size;
-    wrapper->parameter.vector_list_size = parameter_info.capacity.slot_list_size;
-    wrapper->parameter.vector_data_size = parameter_info.vector_format.vector_data_size;
-    wrapper->parameter.vector_intopk = parameter_info.capacity.vector_in_topk;
-    wrapper->parameter.vector_extras = parameter_info.capacity.vector_extras;
-    wrapper->parameter.similar_match = parameter_info.tuning.similar_match;
-    wrapper->parameter.use_fixed_thresh = parameter_info.tuning.use_fixed_thresh;
-    wrapper->parameter.fixed_thresh = parameter_info.tuning.fixed_thresh;
-    wrapper->parameter.start_thresh = parameter_info.tuning.start_thresh;
-    wrapper->parameter.risk_thresh = parameter_info.tuning.risk_thresh;
-    wrapper->parameter.alpha_tighten = parameter_info.tuning.alpha_tighten;
-    wrapper->parameter.alpha_loosen = parameter_info.tuning.alpha_loosen;
-    wrapper->parameter.distance_type = static_cast<uint8_t>(parameter_info.distance_type);
+    wrapper->parameter.vector_format.dimension = parameter_info.vector_format.dimension;
+    wrapper->parameter.vector_format.vector_in_bytes = parameter_info.vector_format.vector_in_bytes;
+
+    wrapper->parameter.capacity.pool_size = parameter_info.capacity.pool_size;
+    wrapper->parameter.capacity.in_topk = parameter_info.capacity.in_topk;
+    wrapper->parameter.capacity.top_delta = parameter_info.capacity.top_delta;
+
+    wrapper->parameter.tuning.global_thresh = parameter_info.tuning.global_thresh;
+    wrapper->parameter.tuning.dropout = parameter_info.tuning.dropout;
+    wrapper->parameter.tuning.risk_thresh = parameter_info.tuning.risk_thresh;
+    wrapper->parameter.tuning.alpha_tighten = parameter_info.tuning.alpha_tighten;
+    wrapper->parameter.tuning.alpha_loosen = parameter_info.tuning.alpha_loosen;
+
+    wrapper->parameter.distance_metric = static_cast<uint8_t>(parameter_info.distance_metric);
 
     return wrapper;
 }
@@ -222,8 +217,8 @@ void akerSetDistanceForVectorSlot(char* vector_slot_wrapper, float distance)
 char* akerCreateVectorView(
     char* vector_slot_wrapper,
     size_t dim,
-    size_t vector_data_size,
-    bool (*conversion_function)(void*, size_t, size_t, void*, uint8_t*))
+    size_t vector_in_bytes,
+    bool (*transform_callback)(void*, size_t, size_t, void*, uint8_t*))
 {
     /* Wrap a VectorSlot as a VectorView for FAISS input conversion. */
     aker::VectorSlot* vector = asVectorSlot(vector_slot_wrapper);
@@ -231,9 +226,9 @@ char* akerCreateVectorView(
 
     vector_view->vector_id = vector->getVectorId();
     vector_view->vector_data = vector->getVectorData();
-    vector_view->vector_dim = dim;
-    vector_view->vector_data_size = vector_data_size;
-    vector_view->conversion_function = conversion_function;
+    vector_view->dimension = dim;
+    vector_view->vector_in_bytes = vector_in_bytes;
+    vector_view->transform_callback = transform_callback;
 
     vector_view->aux_data_1 = vector->getAuxData1();
     vector_view->aux_data_2 = vector->getAuxData2();
@@ -252,15 +247,15 @@ void akerDestroyVectorView(char* vector_view_wrapper)
 char* akerCreateCacheEntry(
     anns_cache_c_wrapper_t* wrapper,
     char* query_vector_slot_wrapper,
-    size_t vector_list_size,
-    char** vector_slot_ref_list)
+    size_t neighbors,
+    char** neighbors_list)
 {
     aker::ANNSCache* cache = asCache(wrapper->anns_cache);
     aker::anns_cache_entry_t* entry =
         cache->createCacheEntry(
             asVectorSlot(query_vector_slot_wrapper),
-            vector_list_size,
-            reinterpret_cast<aker::VectorSlot**>(vector_slot_ref_list));
+            static_cast<std::uint32_t>(neighbors),
+            reinterpret_cast<aker::VectorSlot**>(neighbors_list));
     return asChar(entry);
 }
 
@@ -276,18 +271,18 @@ void akerDestroyCacheEntry(char* cache_entry_wrapper)
 
     if (entry->entry_kind == aker::ANNS_CACHE_ENTRY_KIND_RETURNED_COPY)
     {
-        if (entry->vector_slot_ref_list != nullptr)
+        if (entry->neighbors_list != nullptr)
         {
-            for (size_t i = 0; i < entry->vector_list_size; i++)
-                delete entry->vector_slot_ref_list[i];
+            for (size_t i = 0; i < entry->neighbors; i++)
+                delete entry->neighbors_list[i];
         }
     }
 
     delete entry->query_vector;
     entry->query_vector = nullptr;
 
-    free(entry->vector_slot_ref_list);
-    entry->vector_slot_ref_list = nullptr;
+    free(entry->neighbors_list);
+    entry->neighbors_list = nullptr;
 
     delete entry;
 }
@@ -325,7 +320,7 @@ char* akerGetResultVectorSlotAt(char* cache_entry_wrapper, int index)
         return nullptr;
 
     aker::anns_cache_entry_t* entry = asCacheEntry(cache_entry_wrapper);
-    return reinterpret_cast<char*>(entry->vector_slot_ref_list[index]);
+    return reinterpret_cast<char*>(entry->neighbors_list[index]);
 }
 
 char* akerGetResultVectorSlots(char* cache_entry_wrapper)
@@ -334,7 +329,7 @@ char* akerGetResultVectorSlots(char* cache_entry_wrapper)
         return nullptr;
 
     aker::anns_cache_entry_t* entry = asCacheEntry(cache_entry_wrapper);
-    return reinterpret_cast<char*>(entry->vector_slot_ref_list);
+    return reinterpret_cast<char*>(entry->neighbors_list);
 }
 
 void akerFormatCacheEntryStatus(char* cache_entry_wrapper, char* status_string)
@@ -348,20 +343,20 @@ void akerFormatCacheEntryStatus(char* cache_entry_wrapper, char* status_string)
 
     status += "{";
     status += "Entry ID: " + std::to_string(cache_entry->query_vector->getVectorId()) + ", ";
-    status += "Entry Size: " + std::to_string(cache_entry->vector_list_size) + ", ";
+    status += "Entry Size: " + std::to_string(cache_entry->neighbors) + ", ";
     status += "Entry Thresh: " + std::to_string(cache_entry->thresh) + ", ";
     status += "Entry Min Distance: " + std::to_string(cache_entry->min_distance) + ", ";
     status += "Entry Max Distance: " + std::to_string(cache_entry->max_distance) + ", ";
     status += "Entry Risk Factor: " + std::to_string(cache_entry->risk_factor) + ", ";
 
     status += "List: [";
-    for (size_t i = 0; i < cache_entry->vector_list_size; i++)
+    for (size_t i = 0; i < cache_entry->neighbors; i++)
     {
         if (i > 0)
             status += ", ";
 
         status += "{";
-        aker::VectorSlot* element = cache_entry->vector_slot_ref_list[i];
+        aker::VectorSlot* element = cache_entry->neighbors_list[i];
         status += "VID: ";
 
         if (element == nullptr)
@@ -406,8 +401,8 @@ bool akerLinkCacheEntry(anns_cache_c_wrapper_t* wrapper, char* new_cache_entry_w
     aker::ANNSCache* cache = asCache(wrapper->anns_cache);
     aker::anns_cache_entry_t* entry = asCacheEntry(new_cache_entry_wrapper);
 
-    if (entry->vector_slot_ref_list == nullptr)
-        entry->vector_slot_ref_list = nullptr;
+    if (entry->neighbors_list == nullptr)
+        entry->neighbors_list = nullptr;
 
     return cache->linkCacheEntry(entry, found_id);
 }
@@ -416,22 +411,22 @@ void akerInsertWriteLogEntry(
     anns_cache_c_wrapper_t* wrapper,
     char* vector_view_wrapper,
     float (*distance_function)(uint8_t*, uint8_t*, size_t),
-    void (*result_conversion_function)(uint64_t, uint8_t*, size_t, uint64_t, uint64_t))
+    void (*result_transform_callback)(uint64_t, uint8_t*, size_t, uint64_t, uint64_t))
 {
     aker::ANNSCache* cache = asCache(wrapper->anns_cache);
     cache->insertWriteLogEntry(
         *asVectorView(vector_view_wrapper),
         distance_function,
-        result_conversion_function);
+        result_transform_callback);
 }
 
 void akerProcessWriteLogEntries(
     anns_cache_c_wrapper_t* wrapper,
     float (*distance_function)(uint8_t*, uint8_t*, size_t),
-    void (*result_conversion_function)(uint64_t, uint8_t*, size_t, uint64_t, uint64_t))
+    void (*result_transform_callback)(uint64_t, uint8_t*, size_t, uint64_t, uint64_t))
 {
     aker::ANNSCache* cache = asCache(wrapper->anns_cache);
-    cache->processWriteLogEntries(distance_function, result_conversion_function);
+    cache->processWriteLogEntries(distance_function, result_transform_callback);
 }
 
 void akerMarkVectorDeleted(anns_cache_c_wrapper_t* wrapper, uint64_t vector_id)
@@ -524,7 +519,7 @@ void import_aker_parameter(char* path, anns_cache_parameter_c_t* parameter)
     akerImportAnnsCacheConfig(path, parameter);
 }
 
-bool conversion_function_c_wrapper(void* src, size_t src_size, size_t dim, void* dst, uint8_t* aux)
+bool transform_callback_c_wrapper(void* src, size_t src_size, size_t dim, void* dst, uint8_t* aux)
 {
     return akerDefaultConversionFunction(src, src_size, dim, dst, aux);
 }
@@ -583,10 +578,10 @@ void destroy_vector_slot_c_wrapper(char* vector_2_wrapper)
 char* create_vector_view_c_wrapper(
     char* vector_2_wrapper,
     size_t dim,
-    size_t vector_data_size,
-    bool (*conversion_function)(void*, size_t, size_t, void*, uint8_t*))
+    size_t vector_in_bytes,
+    bool (*transform_callback)(void*, size_t, size_t, void*, uint8_t*))
 {
-    return akerCreateVectorView(vector_2_wrapper, dim, vector_data_size, conversion_function);
+    return akerCreateVectorView(vector_2_wrapper, dim, vector_in_bytes, transform_callback);
 }
 
 void destroy_vector_view_c_wrapper(char* float_vector_2_wrapper)
@@ -598,9 +593,9 @@ char* make_cache_entry_c_wrapper(
     anns_cache_c_wrapper_t* wrapper,
     char* query_vector,
     size_t vector_list_size,
-    char** vector_slot_ref_list)
+    char** neighbors_list)
 {
-    return akerCreateCacheEntry(wrapper, query_vector, vector_list_size, vector_slot_ref_list);
+    return akerCreateCacheEntry(wrapper, query_vector, vector_list_size, neighbors_list);
 }
 
 void free_cache_entry_c_wrapper(char* cache_entry_ptr)
@@ -651,17 +646,17 @@ void insert_wl_entry_c_wrapper(
     anns_cache_c_wrapper_t* wrapper,
     char* float_vector,
     float (*distance_function)(uint8_t*, uint8_t*, size_t),
-    void (*result_conversion_function)(uint64_t, uint8_t*, size_t, uint64_t, uint64_t))
+    void (*result_transform_callback)(uint64_t, uint8_t*, size_t, uint64_t, uint64_t))
 {
-    akerInsertWriteLogEntry(wrapper, float_vector, distance_function, result_conversion_function);
+    akerInsertWriteLogEntry(wrapper, float_vector, distance_function, result_transform_callback);
 }
 
 void consume_wl_entry_c_wrapper(
     anns_cache_c_wrapper_t* wrapper,
     float (*distance_function)(uint8_t*, uint8_t*, size_t),
-    void (*result_conversion_function)(uint64_t, uint8_t*, size_t, uint64_t, uint64_t))
+    void (*result_transform_callback)(uint64_t, uint8_t*, size_t, uint64_t, uint64_t))
 {
-    akerProcessWriteLogEntries(wrapper, distance_function, result_conversion_function);
+    akerProcessWriteLogEntries(wrapper, distance_function, result_transform_callback);
 }
 
 void mark_deleted_c_wrapper(anns_cache_c_wrapper_t* wrapper, uint64_t vector_id)

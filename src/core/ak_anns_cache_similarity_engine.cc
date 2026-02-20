@@ -3,14 +3,28 @@
 #include <cassert>
 #include <limits>
 #include <vector>
+#include <random>
 
 #include "core/ak_anns_cache_similarity_engine.hh"
 #include "core/ak_anns_cache_entry_store.hh"
 #include "ak_logger.hh"
-#include "utils/ak_malloc_ptr.hh"
+#include "utils/ak_stack_alloc.hh"
 
 namespace aker
 {
+    namespace
+    {
+        static int getRandomInt(int min_value, int max_exclusive) noexcept
+        {
+            static thread_local std::mt19937 rng(std::random_device{}());
+            /* Match the original Potluck baseline behavior:
+             * generate an integer in the half-open interval [min, max).
+             */
+            std::uniform_int_distribution<int> dist(min_value, max_exclusive - 1);
+            return dist(rng);
+        }
+    }
+
     ANNSCacheSimilarityEngine::ANNSCacheSimilarityEngine(
         ANNSCacheContext* context,
         ANNSCacheEntryStore* entry_store) noexcept
@@ -36,41 +50,56 @@ namespace aker
             return false;
         }
 
-        std::vector<VectorSlot*> valid_list;
-        std::vector<VectorSlot*> invalid_list;
+        size_t valid_count = 0;
+        size_t invalid_count = 0;
 
-        for (int i = 0; i < entry->vector_list_size; i++)
+        for (int i = 0; i < entry->neighbors; i++)
         {
-            if (entry->vector_slot_ref_list[i] == nullptr)
-                invalid_list.push_back(nullptr);
-            else if (entry->vector_slot_ref_list[i]->isValid())
-                valid_list.push_back(entry->vector_slot_ref_list[i]);
+            VectorSlot* slot = entry->neighbors_list[i];
+            if (slot == nullptr || !slot->isValid())
+                invalid_count++;
             else
-                invalid_list.push_back(entry->vector_slot_ref_list[i]);
+                valid_count++;
         }
 
         bool is_valid = true;
-        if (valid_list.size() < context_->parameter.capacity.vector_in_topk)
+        if (valid_count < context_->parameter.capacity.in_topk)
         {
             entry->version = -1;
             context_->stats.cache_miss++;
             context_->stats.cache_invalid_detect++;
 
-            std::vector<vector_id_t> invalid_vecs{entry->query_vector->getVectorId()};
-            context_->apprx_filter->deleteVectors(invalid_vecs);
+            context_->apprx_filter->deleteVector(entry->query_vector->getVectorId());
 
             is_valid = false;
         }
 
-        if (!invalid_list.empty())
+        if (invalid_count > 0)
         {
-            for (int i = 0; i < entry->vector_list_size; i++)
+            /* Stable reordering: valid vectors keep their relative order,
+             * and invalid ones are moved to the tail in their original order.
+             */
+            reorder_scratch_.clear();
+            reorder_scratch_.reserve(static_cast<size_t>(entry->neighbors));
+
+            for (int i = 0; i < entry->neighbors; i++)
             {
-                if (i < static_cast<int>(valid_list.size()))
-                    entry->vector_slot_ref_list[i] = valid_list[i];
-                else
-                    entry->vector_slot_ref_list[i] = invalid_list[i - static_cast<int>(valid_list.size())];
+                VectorSlot* slot = entry->neighbors_list[i];
+                if (slot != nullptr && slot->isValid())
+                    reorder_scratch_.push_back(slot);
             }
+
+            for (int i = 0; i < entry->neighbors; i++)
+            {
+                VectorSlot* slot = entry->neighbors_list[i];
+                if (slot == nullptr || !slot->isValid())
+                    reorder_scratch_.push_back(slot);
+            }
+
+            assert(reorder_scratch_.size() == static_cast<size_t>(entry->neighbors));
+
+            for (int i = 0; i < entry->neighbors; i++)
+                entry->neighbors_list[i] = reorder_scratch_[static_cast<size_t>(i)];
         }
 
         return is_valid;
@@ -115,13 +144,16 @@ namespace aker
 
                 context_->stats.recordHitHistory();
                 context_->eviction_strategy->recentlyAccessed(entry->query_vector->getVectorId());
-
+#if ((defined(AKER_ENABLE_PROXIMITY_MODE) && (AKER_ENABLE_PROXIMITY_MODE != 0)) ||      (defined(AKER_ENABLE_POTLUCK_MODE) && (AKER_ENABLE_POTLUCK_MODE != 0)))
+                // Proximity/Potluck Mode: keep the threshold fixed (no adaptive update).
+#else
                 if (!linked_hit)
                 {
                     entry->thresh = entry->thresh * context_->parameter.tuning.alpha_loosen;
                     if (entry->thresh > entry->min_distance)
                         entry->thresh = entry->min_distance;
                 }
+#endif
 
                 AKER_LOG_DEBUG << "[ANNSCacheSimilarity] exact hit: query_id=" << query_vector_data.vector_id
                               << " root_id=" << entry->query_vector->getVectorId()
@@ -141,20 +173,22 @@ namespace aker
          * The caller may provide a pre-converted float array.
          */
         const float* faiss_query_vector = query_vector_float;
-        MallocPtr<float> owned_query_vector;
         if (faiss_query_vector == nullptr)
         {
-            owned_query_vector = makeMallocPtr<float>(query_vector_data.vector_dim);
+            /* Defensive fallback: some internal call sites may omit the pre-converted float buffer.
+             * The conversion buffer is stack-allocated and valid for this function's lifetime.
+             */
+            StackFloatBuffer owned_query_vector(static_cast<size_t>(query_vector_data.dimension));
 
-            bool convert_success = query_vector_data.conversion_function(
+            bool convert_success = query_vector_data.transform_callback(
                 query_vector_data.vector_data,
-                query_vector_data.vector_data_size,
-                query_vector_data.vector_dim,
-                owned_query_vector.get(),
+                query_vector_data.vector_in_bytes,
+                query_vector_data.dimension,
+                owned_query_vector.data(),
                 query_vector_data.aux);
             (void)convert_success;
 
-            faiss_query_vector = owned_query_vector.get();
+            faiss_query_vector = owned_query_vector.data();
         }
 
         std::array<float, k_candidate_count> distances{};
@@ -188,18 +222,19 @@ namespace aker
             }
 
             float thresh = 0.0f;
-            if (context_->parameter.tuning.similar_match)
-            {
-                if (context_->parameter.tuning.use_fixed_thresh)
-                    thresh = context_->parameter.tuning.fixed_thresh;
-                else
-                    thresh = std::min(found_entry->min_distance, found_entry->thresh);
-            }
+#if defined(AKER_ENABLE_POTLUCK_MODE) && (AKER_ENABLE_POTLUCK_MODE != 0)
+            thresh = context_->parameter.tuning.global_thresh;
+#elif defined(AKER_ENABLE_PROXIMITY_MODE) && (AKER_ENABLE_PROXIMITY_MODE != 0)
+            thresh = context_->parameter.tuning.global_thresh;
+#else
+            thresh = std::min(found_entry->min_distance, found_entry->thresh);
+            found_entry->thresh = thresh;
+#endif
 
             float query_distance = distance_function(
                 query_vector_data.vector_data,
                 found_entry->query_vector->getVectorData(),
-                query_vector_data.vector_dim);
+                query_vector_data.dimension);
 
             if (query_distance < thresh)
             {
@@ -208,10 +243,57 @@ namespace aker
                               << " query_distance=" << query_distance
                               << " thresh=" << thresh;
 
+                similar_entry = true;
+
+#if defined(AKER_ENABLE_POTLUCK_MODE) && (AKER_ENABLE_POTLUCK_MODE != 0)
+                /* Potluck Mode: apply random dropout to force revalidation.
+                 */
+                context_->eviction_strategy->recentlyAccessed(found_entry->query_vector->getVectorId());
+
+                static constexpr int k_dropout_rand_min = 0;
+                static constexpr int k_dropout_rand_max_exclusive = 100;
+                const int r = getRandomInt(k_dropout_rand_min, k_dropout_rand_max_exclusive);
+
+                if (r < context_->parameter.tuning.dropout)
+                {
+                    /* Mark the entry invalid to be handled later by eviction.
+                     * This reproduces the original Potluck baseline behavior.
+                     */
+                    found_entry->version = -10;
+
+                    context_->stats.cache_dropout++;
+                    context_->stats.cache_miss++;
+                    context_->stats.recordHitHistory();
+
+                    context_->stats.approx_added_counts.push_back(context_->apprx_filter->getAddedCounts());
+                    context_->stats.approx_representative_counts.push_back(context_->apprx_filter->getRepresentativeVectorNumber());
+
+                    return nullptr;
+                }
+
                 context_->stats.cache_sim_hit++;
                 context_->stats.recordHitHistory();
 
-                similar_entry = true;
+                context_->stats.approx_added_counts.push_back(context_->apprx_filter->getAddedCounts());
+                context_->stats.approx_representative_counts.push_back(context_->apprx_filter->getRepresentativeVectorNumber());
+
+                return entry_store_->copyCacheEntry(found_entry);
+
+#elif defined(AKER_ENABLE_PROXIMITY_MODE) && (AKER_ENABLE_PROXIMITY_MODE != 0)
+                /* Proximity Mode: keep the threshold fixed (no adaptive update).
+                 */
+                context_->stats.cache_sim_hit++;
+                context_->stats.recordHitHistory();
+
+                context_->eviction_strategy->recentlyAccessed(found_entry->query_vector->getVectorId());
+
+                context_->stats.approx_added_counts.push_back(context_->apprx_filter->getAddedCounts());
+                context_->stats.approx_representative_counts.push_back(context_->apprx_filter->getRepresentativeVectorNumber());
+
+                return entry_store_->copyCacheEntry(found_entry);
+#else
+                context_->stats.cache_sim_hit++;
+                context_->stats.recordHitHistory();
 
                 found_entry->thresh = found_entry->thresh * context_->parameter.tuning.alpha_tighten;
                 if (found_entry->thresh > found_entry->min_distance)
@@ -223,6 +305,7 @@ namespace aker
                 context_->stats.approx_representative_counts.push_back(context_->apprx_filter->getRepresentativeVectorNumber());
 
                 return entry_store_->copyCacheEntry(found_entry);
+#endif
             }
         }
 

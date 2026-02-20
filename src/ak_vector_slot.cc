@@ -20,15 +20,15 @@ namespace aker
     {
     }
 
-    VectorSlot::VectorSlot(size_t vector_data_size) noexcept
+    VectorSlot::VectorSlot(size_t vector_in_bytes) noexcept
         : vector_header_{0, 0, 1},
-          vector_data_(static_cast<vector_data_t*>(std::malloc(vector_data_size))),
+          vector_data_(static_cast<vector_data_t*>(std::malloc(vector_in_bytes))),
           aux_data_1_(0),
           aux_data_2_(0),
           vector_state_(VECTOR_STATE_VALID),
           distance_(std::numeric_limits<float>::max())
     {
-        assert(vector_data_size == 0 || vector_data_ != nullptr);
+        assert(vector_in_bytes == 0 || vector_data_ != nullptr);
     }
 
     VectorSlot::~VectorSlot() noexcept
@@ -37,24 +37,25 @@ namespace aker
     }
 
     /* Locking primitives.
-     * These remain low-latency spin locks (standard library based).
+     *
+     * Aker's current configuration uses the global ANNSCache lock.
+     * Per-slot locks are intentionally removed, but the methods are
+     * kept as no-ops for backward compatibility.
      */
     void
     VectorSlot::lock() noexcept
     {
-        vector_lock_.lock();
     }
 
     bool
     VectorSlot::tryLock() noexcept
     {
-        return vector_lock_.tryLock();
+        return true;
     }
 
     void
     VectorSlot::unlock() noexcept
     {
-        vector_lock_.unlock();
     }
 
     /* Validity helpers.

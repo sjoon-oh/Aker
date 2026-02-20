@@ -9,8 +9,10 @@
 
 #include "core/ak_anns_cache_maintenance.hh"
 #include "core/ak_anns_cache_entry_store.hh"
+#include "core/ak_anns_cache_similarity_engine.hh"
 #include "ak_logger.hh"
 #include "utils/ak_malloc_ptr.hh"
+#include "utils/ak_stack_alloc.hh"
 
 namespace aker
 {
@@ -26,18 +28,22 @@ namespace aker
         delete entry->query_vector;
         entry->query_vector = nullptr;
 
-        free(entry->vector_slot_ref_list);
-        entry->vector_slot_ref_list = nullptr;
+        free(entry->neighbors_list);
+        entry->neighbors_list = nullptr;
 
         delete entry;
     }
 
-    ANNSCacheMaintenance::ANNSCacheMaintenance(ANNSCacheContext* context, ANNSCacheEntryStore* entry_store) noexcept
+    ANNSCacheMaintenance::ANNSCacheMaintenance(ANNSCacheContext* context,
+        ANNSCacheEntryStore* entry_store,
+        ANNSCacheSimilarityEngine* similarity_engine) noexcept
         : context_(context),
-          entry_store_(entry_store)
+          entry_store_(entry_store),
+          similarity_engine_(similarity_engine)
     {
         assert(context_ != nullptr);
         assert(entry_store_ != nullptr);
+        assert(similarity_engine_ != nullptr);
     }
 
     bool
@@ -46,7 +52,7 @@ namespace aker
         /* Conservative eviction decision based on pool size and incoming list size.
          */
         size_t current_pool_size = context_->vector_pool->getSize();
-        return (current_pool_size + vector_list_size) > context_->parameter.capacity.slot_pool_size;
+        return (current_pool_size + vector_list_size) > context_->parameter.capacity.pool_size;
     }
 
     void
@@ -80,14 +86,14 @@ namespace aker
                 continue;
 
             AKER_LOG_DEBUG << "[ANNSCacheMaintenance] evicting entry: vector_id=" << evict_candidate_id
-                          << " list_size=" << evict_candidate_entry->vector_list_size;
+                          << " neighbors=" << evict_candidate_entry->neighbors;
 
             /* Release all pooled vectors referenced by this entry.
              * We count only actual deletions (refcount reaches zero) toward the eviction target.
              */
-            for (size_t j = 0; j < evict_candidate_entry->vector_list_size; j++)
+            for (size_t j = 0; j < evict_candidate_entry->neighbors; j++)
             {
-                VectorSlot* vector = evict_candidate_entry->vector_slot_ref_list[j];
+                VectorSlot* vector = evict_candidate_entry->neighbors_list[j];
                 if (vector == nullptr)
                     continue;
 
@@ -95,52 +101,6 @@ namespace aker
                 if (deleted)
                     eviction_size++;
             }
-
-            /* Remove linked child entries.
-             */
-            anns_cache_entry_t* child_entry = evict_candidate_entry->next;
-            while (child_entry != nullptr)
-            {
-                vector_id_t child_vector_id = child_entry->query_vector->getVectorId();
-                anns_cache_entry_t* next = child_entry->next;
-
-                context_->lookup_table->map.erase(child_vector_id);
-                destroyCacheEntryObject(child_entry);
-
-                child_entry = next;
-            }
-
-            /* Update write-log statistics based on checkpoint distance.
-             */
-            epoch_t unseen = 0;
-            if (evict_candidate_entry->checkpoint != nullptr)
-            {
-                unseen = context_->write_log->getUnseenDistance(evict_candidate_entry->checkpoint);
-                context_->write_log->releaseCheckpoint(evict_candidate_entry->checkpoint);
-                evict_candidate_entry->checkpoint = nullptr;
-            }
-
-            context_->write_log->removeCacheEntryFromRoundRobin(static_cast<void*>(evict_candidate_entry));
-
-            context_->lookup_table->map.erase(evict_candidate_id);
-            context_->repr_entry_count = context_->eviction_strategy->getCurrSize();
-
-            context_->write_log->removeCacheEntryRisk(evict_candidate_entry->risk_factor, unseen, context_->repr_entry_count);
-
-            context_->evict_entry_count++;
-            destroyCacheEntryObject(evict_candidate_entry);
-
-            evicted_list.push_back(evict_candidate_id);
-        }
-
-        context_->stats.cache_evict += eviction_size;
-        context_->write_log->trimUnreferencedHeadEntries();
-
-        if (!evicted_list.empty())
-        {
-            AKER_LOG_INFO << "[ANNSCacheMaintenance] evicted entries: count=" << evicted_list.size();
-        }
-    }
 
             /* Remove linked child entries.
              */
@@ -213,12 +173,12 @@ namespace aker
 
         /* Optional eviction path.
          */
-        if (needEvictLocked(allocated_entry->vector_list_size))
+        if (needEvictLocked(allocated_entry->neighbors))
         {
             latency_int_1.start();
 
             std::vector<vector_id_t> evicted_list;
-            evictCacheEntriesLocked(allocated_entry->vector_list_size, evicted_list);
+            evictCacheEntriesLocked(allocated_entry->neighbors, evicted_list);
 
             if (!evicted_list.empty())
             {
@@ -257,17 +217,17 @@ namespace aker
          */
         latency_int_3.start();
 
-        float dist_topk = allocated_entry->vector_slot_ref_list[context_->parameter.capacity.vector_in_topk - 1]->getDistance();
+        float dist_topk = allocated_entry->neighbors_list[context_->parameter.capacity.in_topk - 1]->getDistance();
         float dist_max = allocated_entry->max_distance;
 
-        for (size_t i = 0; i < allocated_entry->vector_list_size; i++)
+        for (size_t i = 0; i < allocated_entry->neighbors; i++)
         {
-            vector_id_t result_vector_id = allocated_entry->vector_slot_ref_list[i]->getVectorId();
-            vector_data_t* result_vector_data = allocated_entry->vector_slot_ref_list[i]->getVectorData();
-            float dist = allocated_entry->vector_slot_ref_list[i]->getDistance();
+            vector_id_t result_vector_id = allocated_entry->neighbors_list[i]->getVectorId();
+            vector_data_t* result_vector_data = allocated_entry->neighbors_list[i]->getVectorData();
+            float dist = allocated_entry->neighbors_list[i]->getDistance();
 
             VectorSlot* pooled_vector = context_->vector_pool->acquireOrCreateVector(result_vector_id, result_vector_data);
-            allocated_entry->vector_slot_ref_list[i] = pooled_vector;
+            allocated_entry->neighbors_list[i] = pooled_vector;
 
             float old_dist = pooled_vector->getDistance();
             if (old_dist > dist)
@@ -276,7 +236,7 @@ namespace aker
 
         allocated_entry->entry_kind = ANNS_CACHE_ENTRY_KIND_INTERNAL;
 
-        assert(allocated_entry->vector_list_size >= context_->parameter.capacity.vector_in_topk);
+        assert(allocated_entry->neighbors >= context_->parameter.capacity.in_topk);
         assert(dist_max >= dist_topk);
 
         if (dist_max == 0.0f)
@@ -286,6 +246,10 @@ namespace aker
         }
 
         allocated_entry->risk_factor = dist_topk / dist_max;
+
+#if defined(AKER_ENABLE_POTLUCK_MODE) && (AKER_ENABLE_POTLUCK_MODE != 0)
+        tuneGlobalThresholdAtPutLocked(allocated_entry, query_vector_data);
+#endif
 
         context_->eviction_strategy->addEvictCandidate(vector_id);
         context_->repr_entry_count = context_->eviction_strategy->getCurrSize();
@@ -309,7 +273,7 @@ namespace aker
     void
     ANNSCacheMaintenance::processWriteLogEntriesLocked(
         distance_function_t distance_function,
-        result_conversion_function_t result_conversion_function) noexcept
+        result_transform_callback_t result_transform_callback) noexcept
     {
         /* Triggers the slow-path write-log scan if the read-to-repr ratio is high enough.
          */
@@ -318,7 +282,7 @@ namespace aker
         if (context_->try_read_count > (k_try_read_ratio_thresh * context_->repr_entry_count))
         {
             if (context_->write_log->shouldRunSlowPath())
-                runWriteLogSlowPathLocked(distance_function, result_conversion_function);
+                runWriteLogSlowPathLocked(distance_function, result_transform_callback);
             context_->try_read_count = 0;
         }
     }
@@ -327,7 +291,7 @@ namespace aker
     ANNSCacheMaintenance::updateWriteLogFastPathLocked(
         vector_view_t write_vector,
         distance_function_t distance_function,
-        result_conversion_function_t result_conversion_function,
+        result_transform_callback_t result_transform_callback,
         const float* write_vector_float) noexcept
     {
         /* Fast-path write-log update that opportunistically improves a nearby entry.
@@ -360,17 +324,17 @@ namespace aker
             float query_distance = distance_function(
                 write_vector.vector_data,
                 found_entry->query_vector->getVectorData(),
-                write_vector.vector_dim);
+                write_vector.dimension);
 
             if (query_distance < found_entry->max_distance)
             {
-                for (int j = static_cast<int>(found_entry->vector_list_size - 1); j >= 0; j--)
+                for (int j = static_cast<int>(found_entry->neighbors - 1); j >= 0; j--)
                 {
-                    if (!found_entry->vector_slot_ref_list[j]->isValid())
+                    if (!found_entry->neighbors_list[j]->isValid())
                         continue;
 
-                    vector_id_t delete_vector_id = found_entry->vector_slot_ref_list[j]->getVectorId();
-                    float old_distance = found_entry->vector_slot_ref_list[j]->getDistance();
+                    vector_id_t delete_vector_id = found_entry->neighbors_list[j]->getVectorId();
+                    float old_distance = found_entry->neighbors_list[j]->getDistance();
 
                     vector_id_t write_vector_id = write_vector.vector_id;
                     vector_data_t* write_vector_data = write_vector.vector_data;
@@ -387,20 +351,20 @@ namespace aker
                         std::uint64_t aux_data_1 = found_entry->query_vector->getAuxData1();
                         std::uint64_t aux_data_2 = found_entry->query_vector->getAuxData2();
 
-                        if (result_conversion_function != nullptr)
-                            result_conversion_function(
+                        if (result_transform_callback != nullptr)
+                            result_transform_callback(
                                 write_vector_id,
                                 sub_vec->getVectorData(),
                                 context_->vector_pool->getPayloadSize(),
                                 aux_data_1,
                                 aux_data_2);
 
-                        found_entry->vector_slot_ref_list[j] = sub_vec;
+                        found_entry->neighbors_list[j] = sub_vec;
 
-                        if (j == static_cast<int>(found_entry->vector_list_size - 1))
+                        if (j == static_cast<int>(found_entry->neighbors - 1))
                         {
                             found_entry->max_distance = query_distance;
-                            found_entry->vector_slot_ref_list[j]->setDistance(query_distance);
+                            found_entry->neighbors_list[j]->setDistance(query_distance);
                         }
 
                         break;
@@ -410,10 +374,117 @@ namespace aker
         }
     }
 
+    
+    void
+    ANNSCacheMaintenance::tuneGlobalThresholdAtPutLocked(
+        anns_cache_entry_t* allocated_entry,
+        vector_view_t query_vector_data) noexcept
+    {
+        /* Potluck global threshold tuning at put().
+         *
+         * This logic is intentionally kept as close as possible to the original Potluck baseline:
+         * - It runs only after enough representative entries exist.
+         * - It finds the nearest representative entry.
+         * - It updates the global threshold based on (distance, top-k set equality).
+         */
+        static constexpr size_t k_potluck_min_cache_entries = 100;
+        static constexpr float k_potluck_loosen_weight = 0.8f;
+        static constexpr faiss::idx_t k_search_per_filter = 1;
+        static constexpr size_t k_candidate_count = 2;
+
+        if (context_->lookup_table->map.size() <= k_potluck_min_cache_entries)
+            return;
+
+        assert(context_->has_distance_function);
+        distance_function_t local_distance_function = context_->inst_distance_function;
+        assert(static_cast<bool>(local_distance_function));
+
+        /* Convert query vector to float for approximate filter search.
+         */
+        StackFloatBuffer query_vector_float(static_cast<size_t>(query_vector_data.dimension));
+        bool convert_success = query_vector_data.transform_callback(
+            query_vector_data.vector_data,
+            query_vector_data.vector_in_bytes,
+            query_vector_data.dimension,
+            query_vector_float.data(),
+            query_vector_data.aux);
+        (void)convert_success;
+
+        std::array<float, k_candidate_count> distances{};
+        std::array<faiss::idx_t, k_candidate_count> labels{};
+
+        context_->apprx_filter->searchSimilarVectors(
+            query_vector_float.data(),
+            k_search_per_filter,
+            distances.data(),
+            labels.data());
+
+        for (size_t i = 0; i < k_candidate_count; i++)
+        {
+            if (distances[i] == k_invalid_distance)
+                continue;
+
+            if (labels[i] < 0)
+                continue;
+
+            vector_id_t vector_id = static_cast<vector_id_t>(labels[i]);
+            anns_cache_entry_t* found_entry = entry_store_->getCacheEntry(vector_id);
+            if (found_entry == nullptr)
+                continue;
+
+            bool is_valid = similarity_engine_->validateCacheEntryLocked(found_entry);
+            if (!is_valid)
+                continue;
+
+            float similarity_threshold = context_->parameter.tuning.global_thresh;
+
+            float query_distance = local_distance_function(
+                query_vector_data.vector_data,
+                found_entry->query_vector->getVectorData(),
+                query_vector_data.dimension);
+
+            /* Check the equality of the top-k lists.
+             *
+             * NOTE: This intentionally reproduces the original Potluck baseline behavior:
+             * - It checks only existence.
+             */
+            bool equal = false;
+            for (size_t j = 0; j < context_->parameter.capacity.in_topk; j++)
+            {
+                vector_id_t topk_vector_id = allocated_entry->neighbors_list[j]->getVectorId();
+                for (size_t k = 0; k < context_->parameter.capacity.in_topk; k++)
+                {
+                    if (topk_vector_id == found_entry->neighbors_list[k]->getVectorId())
+                    {
+                        equal = true;
+                        break;
+                    }
+                }
+                if (equal == false)
+                    break;
+            }
+
+            if (query_distance < similarity_threshold)
+            {
+                if (equal == false)
+                    context_->parameter.tuning.global_thresh = context_->parameter.tuning.global_thresh * context_->parameter.tuning.alpha_tighten;
+            }
+            else
+            {
+                if (equal == true)
+                    context_->parameter.tuning.global_thresh = (query_distance * k_potluck_loosen_weight)
+                        + (context_->parameter.tuning.global_thresh * (1.0f - k_potluck_loosen_weight));
+            }
+        }
+
+        context_->stats.global_thresh_history.push_back(context_->parameter.tuning.global_thresh);
+    }
+
+
     void
     ANNSCacheMaintenance::runWriteLogSlowPathLocked(
         distance_function_t distance_function,
-        result_conversion_function_t result_conversion_function) noexcept
+        result_transform_callback_t result_transform_callback) noexcept
     {
         /* Slow-path write-log update.
          * This preserves the snapshot implementation (sweep + topk refresh).
@@ -439,7 +510,7 @@ namespace aker
         latency_int_1.start();
         scan_result = context_->write_log->scanLogWindow(
             saved_entry->query_vector->getVectorData(),
-            context_->parameter.vector_format.vector_dim,
+            context_->parameter.vector_format.dimension,
             saved_entry->max_distance,
             distance_function,
             saved_entry->checkpoint);
@@ -459,23 +530,23 @@ namespace aker
 
         if (!scan_result.candidates.empty())
         {
-            /* Merge refreshed candidates into the top-k list.
+            /* Merge refreshed candidates into the top-k list in-place.
+             *
+             * This follows the original snapshot logic: iterate the current top-k
+             * list (sorted close-to-far) and opportunistically substitute a
+             * candidate when it is closer than the current element.
              */
-            VectorSlot** new_slot_ref_list = new VectorSlot*[context_->parameter.capacity.vector_in_topk];
-            std::memset(new_slot_ref_list, 0, sizeof(VectorSlot*) * context_->parameter.capacity.vector_in_topk);
+            const size_t vector_in_bytes = context_->vector_pool->getPayloadSize();
 
-            int new_slot_ref_index = 0;
-            size_t vector_data_size = context_->vector_pool->getPayloadSize();
-
-            for (int k = 0; k < static_cast<int>(context_->parameter.capacity.vector_in_topk); k++)
+            for (int k = 0; k < static_cast<int>(context_->parameter.capacity.in_topk); k++)
             {
-                float current_distance = saved_entry->vector_slot_ref_list[k]->getDistance();
+                float current_distance = saved_entry->neighbors_list[k]->getDistance();
                 if (!scan_result.candidates.empty())
                 {
                     WriteLogCandidate& current_candidate = scan_result.candidates.back();
                     if (current_distance > current_candidate.distance)
                     {
-                        vector_id_t delete_vector_id = saved_entry->vector_slot_ref_list[k]->getVectorId();
+                        vector_id_t delete_vector_id = saved_entry->neighbors_list[k]->getVectorId();
 
                         vector_id_t found_vector_id = current_candidate.vector_id;
                         const vector_data_t* found_vector_data = current_candidate.vector_data;
@@ -491,39 +562,31 @@ namespace aker
 
                         assert(sub_vec != nullptr);
 
-                        if (result_conversion_function != nullptr)
-                            result_conversion_function(
+                        if (result_transform_callback != nullptr)
+                            result_transform_callback(
                                 found_vector_id,
                                 sub_vec->getVectorData(),
-                                vector_data_size,
+                                vector_in_bytes,
                                 aux_data_1,
                                 aux_data_2);
 
-                        new_slot_ref_list[new_slot_ref_index] = sub_vec;
-                        new_slot_ref_index++;
+                        saved_entry->neighbors_list[k] = sub_vec;
 
                         context_->write_log->recordRefresh();
                         scan_result.candidates.pop_back();
                     }
-                    else
-                    {
-                        new_slot_ref_list[new_slot_ref_index] = saved_entry->vector_slot_ref_list[k];
-                        new_slot_ref_index++;
-                    }
-                }
-                else
-                {
-                    new_slot_ref_list[new_slot_ref_index] = saved_entry->vector_slot_ref_list[k];
-                    new_slot_ref_index++;
                 }
             }
 
-            std::memcpy(
-                saved_entry->vector_slot_ref_list,
-                new_slot_ref_list,
-                sizeof(VectorSlot*) * context_->parameter.capacity.vector_in_topk);
-
-            delete[] new_slot_ref_list;
+            /* Keep max_distance consistent with the last element of the stored list.
+             * When neighbors == in_topk, the last element may be
+             * substituted above.
+             */
+            if (saved_entry->neighbors != 0 && saved_entry->neighbors_list != nullptr)
+            {
+                saved_entry->max_distance =
+                    saved_entry->neighbors_list[saved_entry->neighbors - 1]->getDistance();
+            }
         }
 
         latency_int_2.end();
@@ -537,7 +600,7 @@ namespace aker
     ANNSCacheMaintenance::insertWriteLogEntryLocked(
         vector_view_t write_vector,
         distance_function_t distance_function,
-        result_conversion_function_t result_conversion_function,
+        result_transform_callback_t result_transform_callback,
         const float* write_vector_float) noexcept
     {
         /* Write-log insertion is staged with latency sub-counters.
@@ -556,19 +619,19 @@ namespace aker
         context_->write_log->insertLogEntry(
             write_vector.vector_id,
             write_vector.vector_data,
-            static_cast<size_t>(write_vector.vector_data_size),
+            static_cast<size_t>(write_vector.vector_in_bytes),
             write_vector.aux_data_1,
             write_vector.aux_data_2);
         latency_int_1.end();
         context_->stats.appendLatencySample(ANNSCacheStats::LatencyMetric::k_insert_write_log_entry_step_1, latency_int_1);
 
         latency_int_2.start();
-        updateWriteLogFastPathLocked(write_vector, distance_function, result_conversion_function, write_vector_float);
+        updateWriteLogFastPathLocked(write_vector, distance_function, result_transform_callback, write_vector_float);
         latency_int_2.end();
         context_->stats.appendLatencySample(ANNSCacheStats::LatencyMetric::k_insert_write_log_entry_step_2, latency_int_2);
 
         latency_int_3.start();
-        processWriteLogEntriesLocked(distance_function, result_conversion_function);
+        processWriteLogEntriesLocked(distance_function, result_transform_callback);
         latency_int_3.end();
         context_->stats.appendLatencySample(ANNSCacheStats::LatencyMetric::k_insert_write_log_entry_step_3, latency_int_3);
 

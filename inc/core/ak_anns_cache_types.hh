@@ -46,13 +46,13 @@ namespace aker
      */
     typedef struct ANNSCacheEntry
     {
-        anns_cache_entry_status_t     entry_status;
-        anns_cache_entry_kind_t       entry_kind;
+        anns_cache_entry_status_t       entry_status;
+        anns_cache_entry_kind_t         entry_kind;
         std::int32_t                    version;
 
-        VectorSlot*                        query_vector;
-        std::uint32_t                   vector_list_size;
-        VectorSlot**                       vector_slot_ref_list;
+        VectorSlot*                     query_vector;
+        std::uint32_t                   neighbors;
+        VectorSlot**                    neighbors_list;
 
         float                           thresh;
         float                           min_distance;

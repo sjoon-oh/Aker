@@ -53,7 +53,7 @@ namespace aker
         anns_cache_entry_t* createCacheEntry(
             VectorSlot* query_vector,
             std::uint32_t list_size,
-            VectorSlot** vector_local_reference_list) noexcept;
+            VectorSlot** local_neighbors_list) noexcept;
 
         /**
          * @brief Legacy name for createCacheEntry().
@@ -62,9 +62,9 @@ namespace aker
         anns_cache_entry_t* makeCEntry(
             VectorSlot* query_vector,
             std::uint32_t list_size,
-            VectorSlot** vector_local_reference_list) noexcept
+            VectorSlot** local_neighbors_list) noexcept
         {
-            return createCacheEntry(query_vector, list_size, vector_local_reference_list);
+            return createCacheEntry(query_vector, list_size, local_neighbors_list);
         }
 
         /**
@@ -148,7 +148,7 @@ namespace aker
         void insertWriteLogEntry(
             vector_view_t write_vector,
             distance_function_t distance_function,
-            result_conversion_function_t result_conversion_function = nullptr) noexcept;
+            result_transform_callback_t result_transform_callback = nullptr) noexcept;
 
         /**
          * @brief Legacy name for insertWriteLogEntry().
@@ -157,9 +157,9 @@ namespace aker
         void insertWLEntry3(
             vector_view_t write_vector,
             distance_function_t distance_function,
-            result_conversion_function_t result_conversion_function = nullptr) noexcept
+            result_transform_callback_t result_transform_callback = nullptr) noexcept
         {
-            insertWriteLogEntry(write_vector, distance_function, result_conversion_function);
+            insertWriteLogEntry(write_vector, distance_function, result_transform_callback);
         }
 
         /**
@@ -167,7 +167,7 @@ namespace aker
          */
         void processWriteLogEntries(
             distance_function_t distance_function,
-            result_conversion_function_t result_conversion_function = nullptr) noexcept;
+            result_transform_callback_t result_transform_callback = nullptr) noexcept;
 
         /**
          * @brief Legacy name for processWriteLogEntries().
@@ -175,9 +175,9 @@ namespace aker
         [[deprecated("use processWriteLogEntries()")]]
         void consumeAgedWLEntry(
             distance_function_t distance_function,
-            result_conversion_function_t result_conversion_function = nullptr) noexcept
+            result_transform_callback_t result_transform_callback = nullptr) noexcept
         {
-            processWriteLogEntries(distance_function, result_conversion_function);
+            processWriteLogEntries(distance_function, result_transform_callback);
         }
 
         /**

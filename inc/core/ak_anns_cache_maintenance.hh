@@ -8,6 +8,7 @@
 namespace aker
 {
     class ANNSCacheEntryStore;
+    class ANNSCacheSimilarityEngine;
 
     /**
      * @brief Maintenance module for ANNSCache.
@@ -20,7 +21,9 @@ namespace aker
         /**
          * @brief Constructs the module with the shared cache context.
          */
-        ANNSCacheMaintenance(ANNSCacheContext* context, ANNSCacheEntryStore* entry_store) noexcept;
+        ANNSCacheMaintenance(ANNSCacheContext* context,
+                           ANNSCacheEntryStore* entry_store,
+                           ANNSCacheSimilarityEngine* similarity_engine) noexcept;
 
         /**
          * @brief Inserts a prepared entry into the cache.
@@ -35,7 +38,7 @@ namespace aker
          */
         void processWriteLogEntriesLocked(
             distance_function_t distance_function,
-            result_conversion_function_t result_conversion_function) noexcept;
+            result_transform_callback_t result_transform_callback) noexcept;
 
         /**
          * @brief Inserts a write-log entry and runs fast/slow maintenance.
@@ -43,7 +46,7 @@ namespace aker
         void insertWriteLogEntryLocked(
             vector_view_t write_vector,
             distance_function_t distance_function,
-            result_conversion_function_t result_conversion_function,
+            result_transform_callback_t result_transform_callback,
             const float* write_vector_float) noexcept;
 
         /**
@@ -83,17 +86,25 @@ namespace aker
         void updateWriteLogFastPathLocked(
             vector_view_t write_vector,
             distance_function_t distance_function,
-            result_conversion_function_t result_conversion_function,
+            result_transform_callback_t result_transform_callback,
             const float* write_vector_float) noexcept;
 
         /**
          * @brief Slow-path write-log update (sweep + top-k refresh).
          */
+        /**
+         * @brief Potluck global threshold tuning at put().
+         */
+        void tuneGlobalThresholdAtPutLocked(
+            anns_cache_entry_t* allocated_entry,
+            vector_view_t query_vector_data) noexcept;
+
         void runWriteLogSlowPathLocked(
             distance_function_t distance_function,
-            result_conversion_function_t result_conversion_function) noexcept;
+            result_transform_callback_t result_transform_callback) noexcept;
 
         ANNSCacheContext*    context_;
         ANNSCacheEntryStore* entry_store_;
+        ANNSCacheSimilarityEngine* similarity_engine_;
     };
 }

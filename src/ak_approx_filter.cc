@@ -2,9 +2,10 @@
 
 #include "ak_logger.hh"
 
+#include "utils/ak_stack_alloc.hh"
+
 #include <algorithm>
 #include <cassert>
-#include <mutex>
 #include <unordered_map>
 #include <utility>
 
@@ -41,6 +42,11 @@ namespace aker
             int deleteVectors(std::vector<vector_id_t>& vector_id_list) noexcept;
 
             /**
+             * @brief Tombstones one ID.
+             */
+            int deleteVector(vector_id_t vector_id) noexcept;
+
+            /**
              * @brief Searches the index.
              */
             void searchSimilarVectors(const float* x, faiss::idx_t k, float* distances, faiss::idx_t* labels) noexcept;
@@ -75,7 +81,6 @@ namespace aker
             static constexpr int k_hnsw_ef_search = 8;
             static constexpr int k_hnsw_ef_construction = 16;
 
-            InternalMutex                               filter_lock_;
             anns_cache_config_t                    parameter_;
 
             size_t                                      add_count_;
@@ -86,15 +91,14 @@ namespace aker
         ApproxFilterHnsw2::ApproxFilterHnsw2(
             anns_cache_config_t parameter_info,
             faiss::MetricType metric) noexcept
-            : filter_lock_(),
-              parameter_(parameter_info),
+            : parameter_(parameter_info),
               add_count_(0),
               reg_map_(),
               hnsw_index_wrapper_(nullptr)
         {
             /* Builds a small HNSW index wrapped by IndexIDMap so external IDs are preserved.
              */
-            faiss::IndexHNSWFlat* hnsw_index = new faiss::IndexHNSWFlat(parameter_.vector_format.vector_dim, k_hnsw_m, metric);
+            faiss::IndexHNSWFlat* hnsw_index = new faiss::IndexHNSWFlat(parameter_.vector_format.dimension, k_hnsw_m, metric);
             hnsw_index->hnsw.efSearch = k_hnsw_ef_search;
             hnsw_index->hnsw.efConstruction = k_hnsw_ef_construction;
 
@@ -107,8 +111,6 @@ namespace aker
         {
             /* Registers the ID and inserts the float-converted vector into the FAISS index.
              */
-            std::lock_guard<InternalMutex> guard(filter_lock_);
-
             const auto emplace_result = reg_map_.emplace(query.vector_id, true);
             const bool inserted = emplace_result.second;
             if (!inserted)
@@ -117,12 +119,12 @@ namespace aker
                 return;
             }
 
-            std::vector<float> float_query_data(query.vector_dim);
+            StackFloatBuffer float_query_data(static_cast<size_t>(query.dimension));
 
-            bool converted = query.conversion_function(
+            bool converted = query.transform_callback(
                 query.vector_data,
-                query.vector_data_size,
-                query.vector_dim,
+                query.vector_in_bytes,
+                query.dimension,
                 float_query_data.data(),
                 query.aux);
             (void)converted;
@@ -138,8 +140,6 @@ namespace aker
         {
             /* Applies tombstone deletes by removing IDs from the registration map.
              */
-            std::lock_guard<InternalMutex> guard(filter_lock_);
-
             int deleted = 0;
 
             for (vector_id_t vector_id : vector_id_list)
@@ -158,6 +158,23 @@ namespace aker
             return deleted;
         }
 
+        int
+        ApproxFilterHnsw2::deleteVector(vector_id_t vector_id) noexcept
+        {
+            /* Applies a tombstone delete for a single ID.
+             */
+            const auto it = reg_map_.find(vector_id);
+            if (it == reg_map_.end())
+                return 0;
+
+            reg_map_.erase(it);
+
+            if (reg_map_.empty())
+                hnsw_index_wrapper_->reset();
+
+            return 1;
+        }
+
         void
         ApproxFilterHnsw2::searchSimilarVectors(
             const float* x,
@@ -166,7 +183,6 @@ namespace aker
             faiss::idx_t* labels) noexcept
         {
             /* Delegates to FAISS search. */
-            std::lock_guard<InternalMutex> guard(filter_lock_);
             hnsw_index_wrapper_->search(1, x, k, distances, labels);
         }
 
@@ -174,21 +190,18 @@ namespace aker
         ApproxFilterHnsw2::isRegistered(vector_id_t vector_id) noexcept
         {
             /* Checks tombstone map membership. */
-            std::lock_guard<InternalMutex> guard(filter_lock_);
             return (reg_map_.find(vector_id) != reg_map_.end());
         }
 
         size_t
         ApproxFilterHnsw2::getRepresentativeVectorNumber() noexcept
         {
-            std::lock_guard<InternalMutex> guard(filter_lock_);
             return reg_map_.size();
         }
 
         size_t
         ApproxFilterHnsw2::getAddedCounts() noexcept
         {
-            std::lock_guard<InternalMutex> guard(filter_lock_);
             return add_count_;
         }
 
@@ -196,8 +209,6 @@ namespace aker
         ApproxFilterHnsw2::clear() noexcept
         {
             /* Resets this generation completely. */
-            std::lock_guard<InternalMutex> guard(filter_lock_);
-
             reg_map_.clear();
             hnsw_index_wrapper_->reset();
             add_count_ = 0;
@@ -207,8 +218,6 @@ namespace aker
         ApproxFilterHnsw2::getStatusText() noexcept
         {
             /* Builds a lightweight status summary. */
-            std::lock_guard<InternalMutex> guard(filter_lock_);
-
             std::string status_string;
             status_string += "ApproxFilterHnsw2 Status:\n";
             status_string += "  Registered: " + std::to_string(reg_map_.size()) + "\n";
@@ -222,18 +231,17 @@ namespace aker
 
     ApproxFilterDualHNSW2::ApproxFilterDualHNSW2(anns_cache_config_t parameter_info) noexcept
         : parameter_(parameter_info),
-          filter_lock_(),
           filters_()
     {
         /* Initializes two independent generations.
          */
         faiss::MetricType metric_type = faiss::METRIC_L2;
-        switch (parameter_.distance_type)
+        switch (parameter_.distance_metric)
         {
-            case distance_type_t::DISTANCE_TYPE_L2:
+            case distance_metric_t::DISTANCE_METRIC_L2:
                 metric_type = faiss::METRIC_L2;
                 break;
-            case distance_type_t::DISTANCE_TYPE_IP:
+            case distance_metric_t::DISTANCE_METRIC_IP:
                 metric_type = faiss::METRIC_INNER_PRODUCT;
                 break;
             default:
@@ -258,10 +266,26 @@ namespace aker
     {
         /* Adds the representative vector into the primary generation.
          */
-        std::lock_guard<InternalMutex> guard(filter_lock_);
         filters_[0]->addVector(query);
 
         AKER_LOG_DEBUG << "[ApproxFilter] added representative: vector_id=" << query.vector_id;
+    }
+
+    int
+    ApproxFilterDualHNSW2::deleteVector(vector_id_t vector_id) noexcept
+    {
+        /* Applies tombstone delete to both generations.
+         */
+        int total_deleted = 0;
+        for (size_t i = 0; i < k_num_filters; i++)
+            total_deleted += filters_[i]->deleteVector(vector_id);
+
+        if (total_deleted > 0)
+        {
+            AKER_LOG_DEBUG << "[ApproxFilter] tombstoned vector: vector_id=" << vector_id;
+        }
+
+        return total_deleted;
     }
 
     int
@@ -269,8 +293,6 @@ namespace aker
     {
         /* Applies tombstone deletes to both generations.
          */
-        std::lock_guard<InternalMutex> guard(filter_lock_);
-
         int total_deleted = 0;
         for (size_t i = 0; i < k_num_filters; i++)
             total_deleted += filters_[i]->deleteVectors(vector_id_list);
@@ -294,8 +316,6 @@ namespace aker
          *
          * The arrays are expected to have size `k * k_num_filters`.
          */
-        std::lock_guard<InternalMutex> guard(filter_lock_);
-
         const size_t search_number = static_cast<size_t>(k) * k_num_filters;
 
         std::vector<float> found_distances(search_number);
@@ -315,11 +335,11 @@ namespace aker
         /* Normalizes the distance direction for inner-product searches.
          */
         bool negate_distances = false;
-        switch (parameter_.distance_type)
+        switch (parameter_.distance_metric)
         {
-            case distance_type_t::DISTANCE_TYPE_L2:
+            case distance_metric_t::DISTANCE_METRIC_L2:
                 break;
-            case distance_type_t::DISTANCE_TYPE_IP:
+            case distance_metric_t::DISTANCE_METRIC_IP:
                 negate_distances = true;
                 break;
             default:
@@ -375,8 +395,6 @@ namespace aker
     {
         /* Clears the standby generation and swaps roles.
          */
-        std::lock_guard<InternalMutex> guard(filter_lock_);
-
         const size_t before_repr = filters_[0]->getRepresentativeVectorNumber();
         const size_t before_added = filters_[0]->getAddedCounts();
 
@@ -421,7 +439,7 @@ namespace aker
         /* Triggers rotation when the active generation becomes stale.
          */
         const size_t per_filter_entry_count =
-            parameter_.capacity.slot_pool_size / (parameter_.capacity.slot_list_size * k_num_filters);
+            parameter_.capacity.pool_size / (parameter_.capacity.getSlotListSize() * k_num_filters);
 
         const size_t repr_entries = filters_[0]->getRepresentativeVectorNumber();
         const size_t curr_added = filters_[0]->getAddedCounts();

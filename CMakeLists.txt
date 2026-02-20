@@ -2,11 +2,9 @@ cmake_minimum_required(VERSION 3.10)
 
 project(TopKcache LANGUAGES C CXX)
 
-/**
- * Build configuration
- * - Use C++17
- * - Keep default build type as Debug for single-config generators
- */
+# Build configuration
+# - Use C++17
+# - Keep default build type as Debug for single-config generators
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -19,12 +17,18 @@ if(NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)
     set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS Debug Release RelWithDebInfo MinSizeRel)
 endif()
 
-/**
- * Compile options
- * - Preserve the existing behavior (warnings suppressed by default)
- * - Provide a switch to enable warnings when needed
- */
+# Compile options
+# - Preserve the existing behavior (warnings suppressed by default)
+# - Provide a switch to enable warnings when needed
 option(AKER_SUPPRESS_WARNINGS "Suppress compiler warnings (-w)" ON)
+
+# Mode switches
+# - Standard Mode: adaptive threshold update (default)
+# - Proximity Mode: fixed threshold per entry (compile-time)
+option(AKER_ENABLE_PROXIMITY_MODE "Enable Proximity Mode (fixed threshold per entry)" OFF)
+
+# - Potluck Mode: global threshold tuning + dropout (compile-time)
+option(AKER_ENABLE_POTLUCK_MODE "Enable Potluck Mode (global threshold tuning + dropout)" OFF)
 
 add_library(aker_build_options INTERFACE)
 
@@ -43,9 +47,7 @@ else()
     )
 endif()
 
-/**
- * Dependencies
- */
+# Dependencies
 find_package(Threads REQUIRED)
 
 # Boost
@@ -85,9 +87,7 @@ set_target_properties(faiss::faiss PROPERTIES
     INTERFACE_INCLUDE_DIRECTORIES "${FAISS_INCLUDE_DIR}"
 )
 
-/**
- * Sources
- */
+# Sources
 file(GLOB_RECURSE HDR_FILES
     CONFIGURE_DEPENDS
     "${PROJECT_SOURCE_DIR}/inc/*.h" "${PROJECT_SOURCE_DIR}/inc/*.hh"
@@ -104,10 +104,8 @@ file(GLOB_RECURSE SRC_FILES
 
 set(TOPKACHE_TARGET topkache)
 
-/**
- * Object library
- * - Avoid compiling the same sources twice for shared/static
- */
+# Object library
+# - Avoid compiling the same sources twice for shared/static
 add_library(${TOPKACHE_TARGET}_obj OBJECT ${SRC_FILES})
 set_target_properties(${TOPKACHE_TARGET}_obj PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
@@ -124,9 +122,32 @@ target_link_libraries(${TOPKACHE_TARGET}_obj
         aker_build_options
 )
 
-/**
- * Shared library
- */
+# Cache threshold policy mode (compile-time)
+if(AKER_ENABLE_PROXIMITY_MODE AND AKER_ENABLE_POTLUCK_MODE)
+    message(FATAL_ERROR "AKER_ENABLE_PROXIMITY_MODE and AKER_ENABLE_POTLUCK_MODE are mutually exclusive")
+endif()
+
+if(AKER_ENABLE_POTLUCK_MODE)
+    target_compile_definitions(${TOPKACHE_TARGET}_obj PUBLIC
+        AKER_ENABLE_PROXIMITY_MODE=0
+        AKER_ENABLE_POTLUCK_MODE=1
+        AKER_STANDARD_MODE=0
+    )
+elseif(AKER_ENABLE_PROXIMITY_MODE)
+    target_compile_definitions(${TOPKACHE_TARGET}_obj PUBLIC
+        AKER_ENABLE_PROXIMITY_MODE=1
+        AKER_ENABLE_POTLUCK_MODE=0
+        AKER_STANDARD_MODE=0
+    )
+else()
+    target_compile_definitions(${TOPKACHE_TARGET}_obj PUBLIC
+        AKER_ENABLE_PROXIMITY_MODE=0
+        AKER_ENABLE_POTLUCK_MODE=0
+        AKER_STANDARD_MODE=1
+    )
+endif()
+
+# Shared library
 add_library(${TOPKACHE_TARGET} SHARED $<TARGET_OBJECTS:${TOPKACHE_TARGET}_obj>)
 set_target_properties(${TOPKACHE_TARGET} PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY "${PROJECT_SOURCE_DIR}/build/lib"
@@ -140,9 +161,7 @@ target_link_libraries(${TOPKACHE_TARGET}
         faiss::faiss
 )
 
-/**
- * Static library
- */
+# Static library
 add_library(${TOPKACHE_TARGET}_static STATIC $<TARGET_OBJECTS:${TOPKACHE_TARGET}_obj>)
 set_target_properties(${TOPKACHE_TARGET}_static PROPERTIES
     ARCHIVE_OUTPUT_DIRECTORY "${PROJECT_SOURCE_DIR}/build/lib"
@@ -156,10 +175,8 @@ target_link_libraries(${TOPKACHE_TARGET}_static
         faiss::faiss
 )
 
-/**
- * Test and example binaries
- * - Compile only the test sources and link against the library
- */
+# Test and example binaries
+# - Compile only the test sources and link against the library
 option(TEST_BINARY "Build test binaries" ON)
 
 if(TEST_BINARY)

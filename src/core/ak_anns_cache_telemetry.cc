@@ -53,7 +53,7 @@ namespace aker
             if (entry == nullptr)
                 continue;
 
-            if (entry->vector_slot_ref_list == nullptr)
+            if (entry->neighbors_list == nullptr)
                 continue;
 
             if (entry->next != nullptr)
@@ -98,6 +98,7 @@ namespace aker
         oss << "  Cache miss: " << context_->stats.cache_miss << "\n";
         oss << "  Cache evict: " << context_->stats.cache_evict << "\n";
         oss << "  Cache invalid-detect: " << context_->stats.cache_invalid_detect << "\n";
+        oss << "  Cache dropout: " << context_->stats.cache_dropout << "\n";
         oss << "  Exact hit ratio: " << exact_hit_ratio << "\n";
         oss << "  Total hit ratio: " << total_hit_ratio << "\n";
         oss << "\n";
@@ -126,7 +127,7 @@ namespace aker
             if (entry == nullptr)
                 continue;
 
-            if (entry->vector_slot_ref_list == nullptr)
+            if (entry->neighbors_list == nullptr)
                 continue;
 
             if (entry->next != nullptr)
@@ -182,6 +183,7 @@ namespace aker
         oss << "CacheMiss," << context_->stats.cache_miss << "\n";
         oss << "CacheEvict," << context_->stats.cache_evict << "\n";
         oss << "CacheInvalidDetect," << context_->stats.cache_invalid_detect << "\n";
+        oss << "CacheDropout," << context_->stats.cache_dropout << "\n";
 
         const float denom = static_cast<float>(context_->stats.cache_hit + context_->stats.cache_miss + context_->stats.cache_sim_hit);
         const float exact_hit_ratio = (denom == 0.0f) ? 0.0f : (static_cast<float>(context_->stats.cache_hit) / denom);
@@ -254,22 +256,19 @@ namespace aker
             if (file.is_open())
             {
                 file << "parameter,value\n";
-                file << "vector_dim," << context_->parameter.vector_format.vector_dim << "\n";
-                file << "vector_pool_size," << context_->parameter.capacity.slot_pool_size << "\n";
-                file << "vector_list_size," << context_->parameter.capacity.slot_list_size << "\n";
-                file << "vector_data_size," << context_->parameter.vector_format.vector_data_size << "\n";
-                file << "vector_intopk," << context_->parameter.capacity.vector_in_topk << "\n";
-                file << "vector_extras," << context_->parameter.capacity.vector_extras << "\n";
+                file << "dimension," << context_->parameter.vector_format.dimension << "\n";
+                file << "pool_size," << context_->parameter.capacity.pool_size << "\n";
+                file << "vector_in_bytes," << context_->parameter.vector_format.vector_in_bytes << "\n";
+                file << "in_topk," << context_->parameter.capacity.in_topk << "\n";
+                file << "top_delta," << context_->parameter.capacity.top_delta << "\n";
 
-                file << "similar_match," << static_cast<int>(context_->parameter.tuning.similar_match) << "\n";
-                file << "use_fixed_thresh," << static_cast<int>(context_->parameter.tuning.use_fixed_thresh) << "\n";
-                file << "fixed_thresh," << context_->parameter.tuning.fixed_thresh << "\n";
-                file << "start_thresh," << context_->parameter.tuning.start_thresh << "\n";
+                file << "global_thresh," << context_->parameter.tuning.global_thresh << "\n";
+                file << "dropout," << context_->parameter.tuning.dropout << "\n";
                 file << "risk_thresh," << context_->parameter.tuning.risk_thresh << "\n";
                 file << "alpha_tighten," << context_->parameter.tuning.alpha_tighten << "\n";
                 file << "alpha_loosen," << context_->parameter.tuning.alpha_loosen << "\n";
 
-                file << "distance_type," << static_cast<int>(context_->parameter.distance_type) << "\n";
+                file << "distance_metric," << static_cast<int>(context_->parameter.distance_metric) << "\n";
                 file.close();
             }
         }

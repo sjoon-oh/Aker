@@ -10,7 +10,6 @@
 #include <vector>
 
 #include "ak_vector_slot.hh"
-#include "utils/ak_lock.hh"
 
 namespace aker
 {
@@ -42,7 +41,7 @@ namespace aker
     /**
      * @brief Result conversion callback used by cache maintenance paths.
      */
-    using result_conversion_function_t =
+    using result_transform_callback_t =
         std::function<void(vector_id_t, vector_data_t*, size_t, std::uint64_t, std::uint64_t)>;
 
     /**
@@ -53,7 +52,7 @@ namespace aker
         float distance{0.0f};
         vector_id_t vector_id{0};
         const vector_data_t* vector_data{nullptr};
-        size_t vector_data_size{0};
+        size_t vector_in_bytes{0};
         aux_data_t aux_data_1{0};
         aux_data_t aux_data_2{0};
 
@@ -178,7 +177,7 @@ namespace aker
         void insertLogEntry(
             vector_id_t vector_id,
             const vector_data_t* vector_data,
-            size_t vector_data_size,
+            size_t vector_in_bytes,
             aux_data_t aux_data_1,
             aux_data_t aux_data_2) noexcept;
 
@@ -317,8 +316,6 @@ namespace aker
         const size_t in_topk_;
         const size_t scan_thresh_;
         const double allowed_risk_;
-
-        InternalMutex log_lock_;
 
         epoch_t latest_epoch_{0};
         size_t log_entry_count_{0};

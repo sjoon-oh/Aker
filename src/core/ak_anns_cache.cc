@@ -18,7 +18,7 @@
 #include "core/ak_anns_cache.hh"
 #include "core/ak_anns_cache_context.hh"
 #include "core/ak_anns_cache_modules.hh"
-#include "utils/ak_malloc_ptr.hh"
+#include "utils/ak_stack_alloc.hh"
 
 namespace aker
 {
@@ -32,12 +32,14 @@ namespace aker
           stats(),
           repr_entry_count(0),
           lookup_table(std::make_unique<anns_cache_table_t>()),
-          vector_pool(std::make_unique<VectorSlotPool>(parameter_info.capacity.slot_pool_size, parameter_info.vector_format.vector_data_size)),
+          vector_pool(std::make_unique<VectorSlotPool>(parameter_info.capacity.pool_size, parameter_info.vector_format.vector_in_bytes)),
           eviction_strategy(std::make_unique<EvictionStrategyFifo>()),
           apprx_filter(std::make_unique<ApproxFilterDualHNSW2>(parameter_info)),
           evict_entry_count(0),
-          write_log(std::make_unique<RiskAwareWriteLog>(parameter_info.capacity.vector_in_topk, k_write_log_scan_thresh, parameter_info.tuning.risk_thresh)),
+          write_log(std::make_unique<RiskAwareWriteLog>(parameter_info.capacity.in_topk, k_write_log_scan_thresh, parameter_info.tuning.risk_thresh)),
           try_read_count(0),
+          inst_distance_function(),
+          has_distance_function(false),
           has_activity(false)
     {
     }
@@ -51,28 +53,32 @@ namespace aker
          */
         entry_store_ = std::make_unique<ANNSCacheEntryStore>(context_.get());
         similarity_engine_ = std::make_unique<ANNSCacheSimilarityEngine>(context_.get(), entry_store_.get());
-        maintenance_ = std::make_unique<ANNSCacheMaintenance>(context_.get(), entry_store_.get());
+        maintenance_ = std::make_unique<ANNSCacheMaintenance>(context_.get(), entry_store_.get(), similarity_engine_.get());
         telemetry_ = std::make_unique<ANNSCacheTelemetry>(context_.get());
 
         /* Emit a configuration snapshot for debugging.
          */
         AKER_LOG_INFO << "[ANNSCache] parameters";
-        AKER_LOG_INFO << "  vector_dim=" << context_->parameter.vector_format.vector_dim;
-        AKER_LOG_INFO << "  slot_pool_size=" << context_->parameter.capacity.slot_pool_size;
-        AKER_LOG_INFO << "  slot_list_size=" << context_->parameter.capacity.slot_list_size;
-        AKER_LOG_INFO << "  vector_data_size=" << context_->parameter.vector_format.vector_data_size;
-        AKER_LOG_INFO << "  vector_in_topk=" << context_->parameter.capacity.vector_in_topk;
-        AKER_LOG_INFO << "  vector_extras=" << context_->parameter.capacity.vector_extras;
-        AKER_LOG_INFO << "  similar_match=" << static_cast<int>(context_->parameter.tuning.similar_match);
-        AKER_LOG_INFO << "  use_fixed_thresh=" << static_cast<int>(context_->parameter.tuning.use_fixed_thresh);
-        AKER_LOG_INFO << "  fixed_thresh=" << context_->parameter.tuning.fixed_thresh;
-        AKER_LOG_INFO << "  start_thresh=" << context_->parameter.tuning.start_thresh;
+#if defined(AKER_ENABLE_POTLUCK_MODE) && (AKER_ENABLE_POTLUCK_MODE != 0)
+        AKER_LOG_INFO << "  mode=potluck";
+#elif defined(AKER_ENABLE_PROXIMITY_MODE) && (AKER_ENABLE_PROXIMITY_MODE != 0)
+        AKER_LOG_INFO << "  mode=proximity";
+#else
+        AKER_LOG_INFO << "  mode=standard";
+#endif
+        AKER_LOG_INFO << "  dimension=" << context_->parameter.vector_format.dimension;
+        AKER_LOG_INFO << "  pool_size=" << context_->parameter.capacity.pool_size;
+        AKER_LOG_INFO << "  vector_in_bytes=" << context_->parameter.vector_format.vector_in_bytes;
+        AKER_LOG_INFO << "  in_topk=" << context_->parameter.capacity.in_topk;
+        AKER_LOG_INFO << "  top_delta=" << context_->parameter.capacity.top_delta;
+        AKER_LOG_INFO << "  global_thresh=" << context_->parameter.tuning.global_thresh;
+        AKER_LOG_INFO << "  dropout=" << context_->parameter.tuning.dropout;
         AKER_LOG_INFO << "  risk_thresh=" << context_->parameter.tuning.risk_thresh;
         AKER_LOG_INFO << "  alpha_tighten=" << context_->parameter.tuning.alpha_tighten;
         AKER_LOG_INFO << "  alpha_loosen=" << context_->parameter.tuning.alpha_loosen;
 
-        assert(context_->parameter.capacity.slot_list_size ==
-               (context_->parameter.capacity.vector_in_topk + context_->parameter.capacity.vector_extras));
+        assert(context_->parameter.capacity.getSlotListSize() ==
+               (context_->parameter.capacity.in_topk + context_->parameter.capacity.top_delta));
     }
 
     ANNSCache::~ANNSCache()
@@ -104,7 +110,7 @@ namespace aker
     ANNSCache::createCacheEntry(
         VectorSlot* query_vector,
         std::uint32_t list_size,
-        VectorSlot** vector_local_reference_list) noexcept
+        VectorSlot** local_neighbors_list) noexcept
     {
         /* Prepares a cache entry.
          * The returned entry is not inserted until insertCacheEntry() succeeds.
@@ -120,29 +126,34 @@ namespace aker
         entry->entry_status = ANNS_CACHE_ENTRY_STATUS_VALID;
         entry->version = 0;
 
-        entry->vector_list_size = list_size;
+        entry->neighbors = list_size;
 
-        if (vector_local_reference_list != nullptr)
+        if (local_neighbors_list != nullptr)
         {
-            entry->vector_slot_ref_list = static_cast<VectorSlot**>(
+            entry->neighbors_list = static_cast<VectorSlot**>(
                 aligned_alloc(k_cache_entry_slot_alignment, sizeof(VectorSlot*) * list_size));
-            std::memcpy(entry->vector_slot_ref_list, vector_local_reference_list, sizeof(VectorSlot*) * list_size);
+            std::memcpy(entry->neighbors_list, local_neighbors_list, sizeof(VectorSlot*) * list_size);
 
-            entry->min_distance = entry->vector_slot_ref_list[0]->getDistance();
-            entry->max_distance = entry->vector_slot_ref_list[list_size - 1]->getDistance();
+            entry->min_distance = entry->neighbors_list[0]->getDistance();
+            entry->max_distance = entry->neighbors_list[list_size - 1]->getDistance();
         }
         else
         {
-            entry->vector_slot_ref_list = nullptr;
+            entry->neighbors_list = nullptr;
             entry->min_distance = std::numeric_limits<float>::max();
             entry->max_distance = std::numeric_limits<float>::min();
         }
-
-        entry->thresh = entry->min_distance;
-        entry->thresh *= context_->parameter.tuning.start_thresh;
-
-        if (context_->parameter.tuning.similar_match == 0)
-            entry->thresh = 0;
+#if defined(AKER_ENABLE_POTLUCK_MODE) && (AKER_ENABLE_POTLUCK_MODE != 0)
+        // Potluck Mode: global threshold is tuned at put(), but entries keep this initial value for bookkeeping.
+        entry->thresh = context_->parameter.tuning.global_thresh;
+#elif defined(AKER_ENABLE_PROXIMITY_MODE) && (AKER_ENABLE_PROXIMITY_MODE != 0)
+        // Proximity Mode: use a fixed global threshold for all entries.
+        assert(context_->parameter.tuning.global_thresh > 0.0f);
+        entry->thresh = context_->parameter.tuning.global_thresh;
+#else
+        // Standard Mode: start from a fraction of the closest distance and adapt over time.
+        entry->thresh = entry->min_distance / 4.0f;
+#endif
 
         entry->prev = nullptr;
         entry->next = nullptr;
@@ -167,18 +178,18 @@ namespace aker
 
         if (entry->entry_kind == ANNS_CACHE_ENTRY_KIND_RETURNED_COPY)
         {
-            if (entry->vector_slot_ref_list != nullptr)
+            if (entry->neighbors_list != nullptr)
             {
-                for (size_t i = 0; i < entry->vector_list_size; i++)
-                    delete entry->vector_slot_ref_list[i];
+                for (size_t i = 0; i < entry->neighbors; i++)
+                    delete entry->neighbors_list[i];
             }
         }
 
         delete entry->query_vector;
         entry->query_vector = nullptr;
 
-        free(entry->vector_slot_ref_list);
-        entry->vector_slot_ref_list = nullptr;
+        free(entry->neighbors_list);
+        entry->neighbors_list = nullptr;
 
         delete entry;
     }
@@ -206,20 +217,29 @@ namespace aker
         /* Convert the query vector before entering the global cache critical section.
          * This reduces the lock hold time without changing cache semantics.
          */
-        MallocPtr<float> query_vector_float = makeMallocPtr<float>(query_vector_data.vector_dim);
-        bool convert_success = query_vector_data.conversion_function(
+        StackFloatBuffer query_vector_float(static_cast<size_t>(query_vector_data.dimension));
+        bool convert_success = query_vector_data.transform_callback(
             query_vector_data.vector_data,
-            query_vector_data.vector_data_size,
-            query_vector_data.vector_dim,
-            query_vector_float.get(),
+            query_vector_data.vector_in_bytes,
+            query_vector_data.dimension,
+            query_vector_float.data(),
             query_vector_data.aux);
         (void)convert_success;
 
         {
             std::lock_guard<SpinMutex> cache_guard(context_->cache_lock);
 
+            /* Potluck tuning requires a distance function instance at put().
+             * We capture the first seen distance function to keep the insert path deterministic.
+             */
+            if (!context_->has_distance_function)
+            {
+                context_->inst_distance_function = distance_function;
+                context_->has_distance_function = true;
+            }
+
             result_entry = similarity_engine_->getCacheEntryLocked(
-                query_vector_data, similar_entry, is_invalid, distance_function, query_vector_float.get());
+                query_vector_data, similar_entry, is_invalid, distance_function, query_vector_float.data());
 
             cache_entry_count = context_->eviction_strategy->getCurrSize();
             pool_size = context_->vector_pool->getSize();
@@ -339,7 +359,7 @@ namespace aker
     ANNSCache::insertWriteLogEntry(
         vector_view_t write_vector,
         distance_function_t distance_function,
-        result_conversion_function_t result_conversion_function) noexcept
+        result_transform_callback_t result_transform_callback) noexcept
     {
         context_->has_activity = true;
 
@@ -353,24 +373,33 @@ namespace aker
         /* Convert the write vector before entering the global cache critical section.
          * This is safe because conversion uses only the caller-provided vector buffer.
          */
-        const size_t vector_dim = context_->parameter.vector_format.vector_dim;
-        MallocPtr<float> write_vector_float = makeMallocPtr<float>(vector_dim);
-        bool convert_success = write_vector.conversion_function(
+        const size_t dimension = context_->parameter.vector_format.dimension;
+        StackFloatBuffer write_vector_float(dimension);
+        bool convert_success = write_vector.transform_callback(
             write_vector.vector_data,
-            write_vector.vector_data_size,
-            vector_dim,
-            write_vector_float.get(),
+            write_vector.vector_in_bytes,
+            dimension,
+            write_vector_float.data(),
             write_vector.aux);
         (void)convert_success;
 
         {
             std::lock_guard<SpinMutex> cache_guard(context_->cache_lock);
 
+            /* Potluck tuning requires a distance function instance at put().
+             * We capture the first seen distance function to keep the insert path deterministic.
+             */
+            if (!context_->has_distance_function)
+            {
+                context_->inst_distance_function = distance_function;
+                context_->has_distance_function = true;
+            }
+
             maintenance_->insertWriteLogEntryLocked(
                 write_vector,
                 distance_function,
-                result_conversion_function,
-                write_vector_float.get());
+                result_transform_callback,
+                write_vector_float.data());
 
             cache_entry_count = context_->eviction_strategy->getCurrSize();
             pool_size = context_->vector_pool->getSize();
@@ -388,7 +417,7 @@ namespace aker
     void
     ANNSCache::processWriteLogEntries(
         distance_function_t distance_function,
-        result_conversion_function_t result_conversion_function) noexcept
+        result_transform_callback_t result_transform_callback) noexcept
     {
         context_->has_activity = true;
 
@@ -402,7 +431,16 @@ namespace aker
         {
             std::lock_guard<SpinMutex> cache_guard(context_->cache_lock);
 
-            maintenance_->processWriteLogEntriesLocked(distance_function, result_conversion_function);
+            /* Potluck tuning requires a distance function instance at put().
+             * We capture the first seen distance function to keep the insert path deterministic.
+             */
+            if (!context_->has_distance_function)
+            {
+                context_->inst_distance_function = distance_function;
+                context_->has_distance_function = true;
+            }
+
+            maintenance_->processWriteLogEntriesLocked(distance_function, result_transform_callback);
 
             cache_entry_count = context_->eviction_strategy->getCurrSize();
             pool_size = context_->vector_pool->getSize();

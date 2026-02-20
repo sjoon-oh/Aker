@@ -30,26 +30,41 @@ extern "C" {
 
 /**
  * @brief C configuration struct for ANNSCache.
+ *
+ * This struct mirrors the C++ configuration layout (ANNSCacheConfig):
+ * - vector_format
+ * - capacity
+ * - tuning
+ * - distance_metric
  */
-typedef struct ParameterInfoC {
-    uint32_t vector_dim;
-    size_t vector_pool_size;
-    size_t vector_list_size;
-    size_t vector_data_size;
-    size_t vector_intopk;
-    size_t vector_extras;
 
-    bool similar_match;
-    bool use_fixed_thresh;
-    float fixed_thresh;
-    float start_thresh;
+typedef struct VectorFormatConfigC {
+    uint32_t dimension;
+    size_t vector_in_bytes;
+} anns_cache_vector_format_config_c_t;
+
+typedef struct CacheCapacityConfigC {
+    size_t pool_size;
+    size_t in_topk;
+    size_t top_delta;
+} anns_cache_capacity_config_c_t;
+
+typedef struct AlgorithmTuningConfigC {
+    float global_thresh;
+    float dropout;
 
     float risk_thresh;
     float alpha_tighten;
     float alpha_loosen;
+} anns_cache_tuning_config_c_t;
+
+typedef struct ANNSCacheConfigC {
+    anns_cache_vector_format_config_c_t vector_format;
+    anns_cache_capacity_config_c_t capacity;
+    anns_cache_tuning_config_c_t tuning;
 
     /** 0: L2, 1: Inner Product */
-    uint8_t distance_type;
+    uint8_t distance_metric;
 } anns_cache_parameter_c_t;
 
 /**
@@ -135,8 +150,8 @@ void akerSetDistanceForVectorSlot(char* vector_slot_wrapper, float distance);
 char* akerCreateVectorView(
     char* vector_slot_wrapper,
     size_t dim,
-    size_t vector_data_size,
-    bool (*conversion_function)(void*, size_t, size_t, void*, uint8_t*));
+    size_t vector_in_bytes,
+    bool (*transform_callback)(void*, size_t, size_t, void*, uint8_t*));
 
 /**
  * @brief Destroys a VectorView wrapper.
@@ -149,8 +164,8 @@ void akerDestroyVectorView(char* vector_view_wrapper);
 char* akerCreateCacheEntry(
     anns_cache_c_wrapper_t* wrapper,
     char* query_vector_slot_wrapper,
-    size_t vector_list_size,
-    char** vector_slot_ref_list);
+    size_t neighbors,
+    char** neighbors_list);
 
 /**
  * @brief Destroys a cache entry returned to the caller.
@@ -206,7 +221,7 @@ void akerInsertWriteLogEntry(
     anns_cache_c_wrapper_t* wrapper,
     char* vector_view_wrapper,
     float (*distance_function)(uint8_t*, uint8_t*, size_t),
-    void (*result_conversion_function)(uint64_t, uint8_t*, size_t, uint64_t, uint64_t));
+    void (*result_transform_callback)(uint64_t, uint8_t*, size_t, uint64_t, uint64_t));
 
 /**
  * @brief Processes write-log slow-path updates.
@@ -214,7 +229,7 @@ void akerInsertWriteLogEntry(
 void akerProcessWriteLogEntries(
     anns_cache_c_wrapper_t* wrapper,
     float (*distance_function)(uint8_t*, uint8_t*, size_t),
-    void (*result_conversion_function)(uint64_t, uint8_t*, size_t, uint64_t, uint64_t));
+    void (*result_transform_callback)(uint64_t, uint8_t*, size_t, uint64_t, uint64_t));
 
 /**
  * @brief Marks a vector as deleted (tombstone) in the cache slot pool.
@@ -281,7 +296,7 @@ void akerHelperMapClear();
 void import_aker_parameter(char* path, anns_cache_parameter_c_t* parameter)
     AKER_DEPRECATED("Use akerImportAnnsCacheConfig()");
 
-bool conversion_function_c_wrapper(void* src, size_t src_size, size_t dim, void* dst, uint8_t* aux)
+bool transform_callback_c_wrapper(void* src, size_t src_size, size_t dim, void* dst, uint8_t* aux)
     AKER_DEPRECATED("Use akerDefaultConversionFunction()");
 
 anns_cache_c_wrapper_t* create_ann_cache_2_c_wrapper(anns_cache_parameter_c_t parameter)
@@ -312,15 +327,15 @@ void set_distance_vector_slot_c_wrapper(char* vector_2_wrapper, float distance)
 void destroy_vector_slot_c_wrapper(char* vector_2_wrapper)
     AKER_DEPRECATED("Use akerDestroyVectorSlot()");
 
-char* create_vector_view_c_wrapper(char* vector_2_wrapper, size_t dim, size_t vector_data_size,
-                                 bool (*conversion_function)(void*, size_t, size_t, void*, uint8_t*))
+char* create_vector_view_c_wrapper(char* vector_2_wrapper, size_t dim, size_t vector_in_bytes,
+                                 bool (*transform_callback)(void*, size_t, size_t, void*, uint8_t*))
     AKER_DEPRECATED("Use akerCreateVectorView()");
 
 void destroy_vector_view_c_wrapper(char* float_vector_2_wrapper)
     AKER_DEPRECATED("Use akerDestroyVectorView()");
 
 char* make_cache_entry_c_wrapper(anns_cache_c_wrapper_t* wrapper, char* query_vector,
-                               size_t vector_list_size, char** vector_slot_ref_list)
+                               size_t neighbors, char** neighbors_list)
     AKER_DEPRECATED("Use akerCreateCacheEntry()");
 
 void free_cache_entry_c_wrapper(char* cache_entry_ptr)
@@ -349,12 +364,12 @@ bool link_cache_entry_c_wrapper(anns_cache_c_wrapper_t* wrapper, char* new_cache
 
 void insert_wl_entry_c_wrapper(anns_cache_c_wrapper_t* wrapper, char* float_vector,
                              float (*distance_function)(uint8_t*, uint8_t*, size_t),
-                             void (*result_conversion_function)(uint64_t, uint8_t*, size_t, uint64_t, uint64_t))
+                             void (*result_transform_callback)(uint64_t, uint8_t*, size_t, uint64_t, uint64_t))
     AKER_DEPRECATED("Use akerInsertWriteLogEntry()");
 
 void consume_wl_entry_c_wrapper(anns_cache_c_wrapper_t* wrapper,
                               float (*distance_function)(uint8_t*, uint8_t*, size_t),
-                              void (*result_conversion_function)(uint64_t, uint8_t*, size_t, uint64_t, uint64_t))
+                              void (*result_transform_callback)(uint64_t, uint8_t*, size_t, uint64_t, uint64_t))
     AKER_DEPRECATED("Use akerProcessWriteLogEntries()");
 
 void mark_deleted_c_wrapper(anns_cache_c_wrapper_t* wrapper, uint64_t vector_id)

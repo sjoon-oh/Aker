@@ -14,7 +14,6 @@
 
 #include "ak_anns_cache_config.hh"
 #include "ak_vector_slot.hh"
-#include "utils/ak_lock.hh"
 
 namespace aker
 {
@@ -32,7 +31,7 @@ namespace aker
      *
      * @return true on successful conversion.
      */
-    using conversion_function_t =
+    using transform_callback_t =
         std::function<bool(vector_data_t* src, size_t src_size, std::uint32_t dim, float* dst, std::uint8_t* aux)>;
 
     /**
@@ -50,13 +49,13 @@ namespace aker
     {
         vector_id_t           vector_id{0};
         vector_data_t*        vector_data{nullptr};
-        std::uint32_t         vector_dim{0};
-        std::uint32_t         vector_data_size{0};
+        std::uint32_t         dimension{0};
+        std::uint32_t         vector_in_bytes{0};
 
         std::uint64_t         aux_data_1{0};
         std::uint64_t         aux_data_2{0};
 
-        conversion_function_t conversion_function{};
+        transform_callback_t  transform_callback{};
         std::uint8_t*         aux{nullptr};
     };
 
@@ -99,6 +98,11 @@ namespace aker
          * @brief Adds a representative vector into the primary filter.
          */
         void addVector(vector_view_t query) noexcept;
+
+        /**
+         * @brief Tombstones one vector ID across both generations.
+         */
+        int deleteVector(vector_id_t vector_id) noexcept;
 
         /**
          * @brief Tombstones vector IDs across both generations.
@@ -150,7 +154,6 @@ namespace aker
         static constexpr size_t k_num_filters = 2;
 
         anns_cache_config_t parameter_;
-        InternalMutex            filter_lock_;
 
         std::array<std::unique_ptr<detail::ApproxFilterHnsw2>, k_num_filters> filters_;
 

@@ -48,19 +48,19 @@ namespace aker
         new_entry->entry_status = entry->entry_status;
         new_entry->version = entry->version;
 
-        new_entry->vector_list_size = entry->vector_list_size;
+        new_entry->neighbors = entry->neighbors;
 
-        if (entry->vector_slot_ref_list != nullptr && entry->vector_list_size > 0)
+        if (entry->neighbors_list != nullptr && entry->neighbors > 0)
         {
-            new_entry->vector_slot_ref_list = static_cast<VectorSlot**>(
-                aligned_alloc(k_cache_entry_slot_alignment, sizeof(VectorSlot*) * entry->vector_list_size));
+            new_entry->neighbors_list = static_cast<VectorSlot**>(
+                aligned_alloc(k_cache_entry_slot_alignment, sizeof(VectorSlot*) * entry->neighbors));
 
-            for (size_t i = 0; i < entry->vector_list_size; i++)
-                new_entry->vector_slot_ref_list[i] = cloneVectorBasic(entry->vector_slot_ref_list[i], vec_data_size);
+            for (size_t i = 0; i < entry->neighbors; i++)
+                new_entry->neighbors_list[i] = cloneVectorBasic(entry->neighbors_list[i], vec_data_size);
         }
         else
         {
-            new_entry->vector_slot_ref_list = nullptr;
+            new_entry->neighbors_list = nullptr;
         }
 
         new_entry->min_distance = entry->min_distance;

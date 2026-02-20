@@ -93,12 +93,12 @@ namespace aker
         /**
          * @brief Default reserve size to avoid frequent reallocations.
          */
-        static constexpr std::size_t k_default_latency_reserve = 1024;
+        static constexpr std::size_t k_default_latency_reserve = 100000;
 
         /**
          * @brief Default reserve size for per-request cache history.
          */
-        static constexpr std::size_t k_default_history_reserve = 1024;
+        static constexpr std::size_t k_default_history_reserve = 100000;
 
         /**
          * @brief Protects all telemetry buffers in this class.
@@ -113,6 +113,11 @@ namespace aker
         size_t cache_invalid_detect{0};
         size_t cache_evict{0};
         size_t cache_sim_hit{0};
+
+        /**
+         * @brief Potluck-only counter: number of dropped sim-hit requests.
+         */
+        size_t cache_dropout{0};
 
         /**
          * @brief Latency series indexed by LatencyMetric.
@@ -130,6 +135,11 @@ namespace aker
          */
         std::vector<size_t> approx_added_counts;
         std::vector<size_t> approx_representative_counts;
+
+        /**
+         * @brief Potluck global threshold tuning history.
+         */
+        std::vector<float> global_thresh_history;
 
         /**
          * @brief Per-request cache history samples.

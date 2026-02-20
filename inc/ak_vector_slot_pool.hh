@@ -17,7 +17,6 @@
 #include <vector>
 
 #include "ak_vector_slot.hh"
-#include "utils/ak_lock.hh"
 
 namespace aker
 {
@@ -28,16 +27,11 @@ namespace aker
      * lock that serializes all cache mutations. Under that model, internal pool
      * sharding/locking provides little benefit and adds overhead.
      *
-     * This pool still supports optional internal locking via `AKER_ENABLE_INTERNAL_LOCKS`.
+     * This pool assumes upper-layer synchronization (global cache lock).
      */
     class VectorSlotPool
     {
     private:
-        /**
-         * @brief Optional internal lock for standalone use.
-         */
-        mutable InternalMutex pool_lock_;
-
         /**
          * @brief Map from vector_id to pooled VectorSlot.
          */

@@ -17,7 +17,6 @@
 #include <cstring>
 #include <string>
 
-#include "utils/ak_lock.hh"
 
 namespace aker
 {
@@ -66,9 +65,11 @@ namespace aker
         aux_data_t                          aux_data_1_;
         aux_data_t                          aux_data_2_;
 
-        /* Per-vector lock and state.
+        /* Per-vector state.
+         *
+         * This project is configured to use the global ANNSCache lock.
+         * Per-vector locks are intentionally removed.
          */
-        InternalMutex                       vector_lock_;
         vector_state_t                      vector_state_;
 
         /* Distance metadata used by the cache logic.
@@ -77,7 +78,7 @@ namespace aker
 
     public:
         VectorSlot() noexcept;
-        VectorSlot(size_t vector_data_size) noexcept;
+        VectorSlot(size_t vector_in_bytes) noexcept;
         virtual ~VectorSlot() noexcept;
 
         /* Locking interface.

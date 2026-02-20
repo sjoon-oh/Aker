@@ -1,6 +1,5 @@
 #include <cassert>
 #include <cstring>
-#include <mutex>
 #include <sstream>
 
 #include "ak_logger.hh"
@@ -9,8 +8,7 @@
 namespace aker
 {
     VectorSlotPool::VectorSlotPool(size_t pool_capacity, size_t payload_size, size_t /*shard_count*/) noexcept
-        : pool_lock_(),
-          vector_map_(),
+        : vector_map_(),
           pool_capacity_(pool_capacity),
           payload_size_(payload_size)
     {
@@ -95,8 +93,6 @@ namespace aker
     VectorSlot*
     VectorSlotPool::acquireOrCreateVector(vector_id_t vector_id, const vector_data_t* vector_data) noexcept
     {
-        /* Pool critical section (optional under global cache lock). */
-        std::lock_guard<InternalMutex> lock_guard(pool_lock_);
         return acquireOrCreateVectorUnsafe(vector_id, vector_data);
     }
 
@@ -104,12 +100,8 @@ namespace aker
     VectorSlotPool::releaseVectorReference(vector_id_t vector_id) noexcept
     {
         VectorSlot* deleted_vector = nullptr;
-        bool deleted = false;
 
-        {
-            std::lock_guard<InternalMutex> lock_guard(pool_lock_);
-            deleted = releaseVectorReferenceUnsafe(vector_id, &deleted_vector);
-        }
+        bool deleted = releaseVectorReferenceUnsafe(vector_id, &deleted_vector);
 
         if (deleted && deleted_vector != nullptr)
         {
@@ -128,13 +120,9 @@ namespace aker
     {
         VectorSlot* deleted_vector = nullptr;
         VectorSlot* allocated_vector = nullptr;
-        bool deleted = false;
 
-        {
-            std::lock_guard<InternalMutex> lock_guard(pool_lock_);
-            deleted = releaseVectorReferenceUnsafe(delete_vector_id, &deleted_vector);
-            allocated_vector = acquireOrCreateVectorUnsafe(alloc_vector_id, alloc_vector_data);
-        }
+        bool deleted = releaseVectorReferenceUnsafe(delete_vector_id, &deleted_vector);
+        allocated_vector = acquireOrCreateVectorUnsafe(alloc_vector_id, alloc_vector_data);
 
         if (deleted && deleted_vector != nullptr)
         {
@@ -148,8 +136,6 @@ namespace aker
     bool
     VectorSlotPool::invalidateVector(vector_id_t vector_id) noexcept
     {
-        std::lock_guard<InternalMutex> lock_guard(pool_lock_);
-
         auto it = vector_map_.find(vector_id);
         if (it == vector_map_.end())
             return false;
@@ -171,10 +157,6 @@ namespace aker
     size_t
     VectorSlotPool::getSize() const noexcept
     {
-        /* In the default build, the pool is used under the global cache lock.
-         * For completeness, we still guard the map access with the internal lock.
-         */
-        std::lock_guard<InternalMutex> lock_guard(pool_lock_);
         return vector_map_.size();
     }
 
@@ -195,8 +177,6 @@ namespace aker
     {
         /* Collect a snapshot of pooled vectors. */
         pooled_list.clear();
-
-        std::lock_guard<InternalMutex> lock_guard(pool_lock_);
         pooled_list.reserve(vector_map_.size());
 
         for (const auto& kv : vector_map_)
@@ -206,13 +186,10 @@ namespace aker
     void
     VectorSlotPool::clear() noexcept
     {
-        /* Detach the map content under lock, then delete outside to minimize lock hold time. */
+        /* Clear the pool. The upper layer is responsible for synchronization. */
         std::unordered_map<vector_id_t, VectorSlot*> local_map;
 
-        {
-            std::lock_guard<InternalMutex> lock_guard(pool_lock_);
-            local_map.swap(vector_map_);
-        }
+        local_map.swap(vector_map_);
 
         for (auto& kv : local_map)
         {
@@ -232,16 +209,13 @@ namespace aker
         size_t valid_count = 0;
         size_t pool_size = 0;
 
-        {
-            std::lock_guard<InternalMutex> lock_guard(pool_lock_);
-            pool_size = vector_map_.size();
+        pool_size = vector_map_.size();
 
-            for (const auto& kv : vector_map_)
-            {
-                ++observed_elements;
-                if (kv.second->isValid())
-                    ++valid_count;
-            }
+        for (const auto& kv : vector_map_)
+        {
+            ++observed_elements;
+            if (kv.second->isValid())
+                ++valid_count;
         }
 
         std::ostringstream oss;

@@ -6,7 +6,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <iomanip>
-#include <mutex>
 #include <sstream>
 
 #include "ak_logger.hh"
@@ -23,7 +22,7 @@ namespace aker
         aux_data_t aux_data_1{0};
         aux_data_t aux_data_2{0};
 
-        size_t vector_data_size{0};
+        size_t vector_in_bytes{0};
         vector_data_t* vector_data{nullptr};
 
         std::uint32_t reference_count{0};
@@ -32,7 +31,7 @@ namespace aker
         WriteLogEntryNode* next{nullptr};
 
         explicit WriteLogEntryNode(size_t payload_size) noexcept
-            : vector_data_size(payload_size),
+            : vector_in_bytes(payload_size),
               vector_data(payload_size == 0 ? nullptr : static_cast<vector_data_t*>(std::malloc(payload_size)))
         {
             assert(payload_size == 0 || vector_data != nullptr);
@@ -192,14 +191,12 @@ namespace aker
     RiskAwareWriteLog::insertLogEntry(
         vector_id_t vector_id,
         const vector_data_t* vector_data,
-        size_t vector_data_size,
+        size_t vector_in_bytes,
         aux_data_t aux_data_1,
         aux_data_t aux_data_2) noexcept
     {
         /* Insert a new log node (one-copy) and link it to the tail.
          */
-        std::lock_guard<InternalMutex> log_guard(log_lock_);
-
         latest_epoch_++;
 
         const auto existing = log_map_.find(vector_id);
@@ -212,16 +209,16 @@ namespace aker
             return;
         }
 
-        WriteLogEntryNode* node = new WriteLogEntryNode(vector_data_size);
+        WriteLogEntryNode* node = new WriteLogEntryNode(vector_in_bytes);
         node->epoch = latest_epoch_;
         node->vector_id = vector_id;
         node->aux_data_1 = aux_data_1;
         node->aux_data_2 = aux_data_2;
         node->reference_count = 0;
 
-        if (vector_data_size > 0 && vector_data != nullptr)
+        if (vector_in_bytes > 0 && vector_data != nullptr)
         {
-            std::memcpy(node->vector_data, vector_data, vector_data_size);
+            std::memcpy(node->vector_data, vector_data, vector_in_bytes);
         }
 
         /* Link into the list.
@@ -244,7 +241,7 @@ namespace aker
 
         AKER_LOG_DEBUG << "[WriteLog] inserted log entry: epoch=" << node->epoch
                       << " vector_id=" << node->vector_id
-                      << " payload_size=" << node->vector_data_size;
+                      << " payload_size=" << node->vector_in_bytes;
     }
 
     void
@@ -256,8 +253,6 @@ namespace aker
         {
             return;
         }
-
-        std::lock_guard<InternalMutex> log_guard(log_lock_);
 
         if (round_robin_location_.find(cache_entry) != round_robin_location_.end())
         {
@@ -275,8 +270,6 @@ namespace aker
     {
         /* Rotate RR list and return front element.
          */
-        std::lock_guard<InternalMutex> log_guard(log_lock_);
-
         if (round_robin_list_.empty())
         {
             return nullptr;
@@ -302,8 +295,6 @@ namespace aker
             return false;
         }
 
-        std::lock_guard<InternalMutex> log_guard(log_lock_);
-
         const auto it = round_robin_location_.find(cache_entry);
         if (it == round_robin_location_.end())
         {
@@ -320,8 +311,6 @@ namespace aker
     {
         /* Return the current tail with a retained reference.
          */
-        std::lock_guard<InternalMutex> log_guard(log_lock_);
-
         if (log_tail_ == nullptr)
         {
             return nullptr;
@@ -334,7 +323,6 @@ namespace aker
     void
     RiskAwareWriteLog::releaseCheckpoint(write_log_checkpoint_t checkpoint) noexcept
     {
-        std::lock_guard<InternalMutex> log_guard(log_lock_);
         releaseNodeLocked(checkpoint);
     }
 
@@ -348,8 +336,6 @@ namespace aker
             return;
         }
 
-        std::lock_guard<InternalMutex> log_guard(log_lock_);
-
         releaseNodeLocked(checkpoint_slot);
         checkpoint_slot = new_checkpoint;
     }
@@ -359,8 +345,6 @@ namespace aker
     {
         /* Compute distance from checkpoint epoch to latest epoch.
          */
-        std::lock_guard<InternalMutex> log_guard(log_lock_);
-
         if (log_head_ == nullptr || log_tail_ == nullptr)
         {
             return 0;
@@ -384,117 +368,72 @@ namespace aker
         const distance_function_t& distance_function,
         write_log_checkpoint_t scan_start) noexcept
     {
-        /* Scan a bounded window without holding the log lock during distance computation.
+        /* Scan a bounded window.
+         *
+         * This codebase relies on the upper ANNSCache layer holding a global lock,
+         * so we do not pin every scanned node. Only the returned new checkpoint is
+         * retained to keep trimming safe across calls.
          */
         WriteLogScanResult result;
         result.owner_ = this;
         result.candidates.reserve(scan_thresh_);
 
-        std::vector<write_log_checkpoint_t> scan_nodes;
-        scan_nodes.reserve(scan_thresh_);
-
-        write_log_checkpoint_t cursor = nullptr;
-        epoch_t start_epoch = 0;
-        epoch_t end_epoch = 0;
-
+        write_log_checkpoint_t start_node = (scan_start != nullptr) ? scan_start : log_head_;
+        if (start_node == nullptr)
         {
-            std::lock_guard<InternalMutex> log_guard(log_lock_);
-
-            write_log_checkpoint_t start_node = (scan_start != nullptr) ? scan_start : log_head_;
-            if (start_node == nullptr)
-            {
-                result.new_checkpoint = nullptr;
-                result.advanced_epoch_distance = 0;
-                return result;
-            }
-
-            /* Pin a stable scan window of nodes.
-             */
-            cursor = start_node;
-            for (size_t i = 0; i < scan_thresh_ && cursor != nullptr; i++)
-            {
-                retainNodeLocked(cursor);
-                scan_nodes.push_back(cursor);
-                cursor = cursor->next;
-            }
-
-            /* Select the next checkpoint after the scan window.
-             */
-            if (cursor == nullptr)
-            {
-                cursor = log_tail_;
-            }
-
-            if (cursor != nullptr)
-            {
-                retainNodeLocked(cursor);
-            }
-
-            result.new_checkpoint = cursor;
-
-            start_epoch = (scan_start != nullptr) ? scan_start->epoch : 0;
-            end_epoch = (cursor != nullptr) ? cursor->epoch : 0;
-            result.advanced_epoch_distance = (scan_start == nullptr)
-                                                 ? end_epoch
-                                                 : ((end_epoch >= start_epoch) ? (end_epoch - start_epoch) : 0);
-
-            AKER_LOG_DEBUG << "[WriteLog] scan window pinned: start_epoch=" << start_epoch
-                          << " end_epoch=" << end_epoch
-                          << " advanced=" << result.advanced_epoch_distance
-                          << " window_size=" << scan_nodes.size();
+            result.new_checkpoint = nullptr;
+            result.advanced_epoch_distance = 0;
+            return result;
         }
 
-        /* Compute distances outside the write-log lock.
+        write_log_checkpoint_t cursor = start_node;
+        size_t scanned_nodes = 0;
+
+        for (; scanned_nodes < scan_thresh_ && cursor != nullptr; scanned_nodes++)
+        {
+            if (cursor->vector_data != nullptr)
+            {
+                const float distance = distance_function(query_vector_data, cursor->vector_data, query_vector_dim);
+                if (distance < entry_max_distance)
+                {
+                    WriteLogCandidate candidate;
+                    candidate.distance = distance;
+                    candidate.vector_id = cursor->vector_id;
+                    candidate.vector_data = cursor->vector_data;
+                    candidate.vector_in_bytes = cursor->vector_in_bytes;
+                    candidate.aux_data_1 = cursor->aux_data_1;
+                    candidate.aux_data_2 = cursor->aux_data_2;
+                    candidate.node = nullptr;
+
+                    result.candidates.push_back(candidate);
+                }
+            }
+
+            cursor = cursor->next;
+        }
+
+        if (cursor == nullptr)
+            cursor = log_tail_;
+
+        result.new_checkpoint = cursor;
+
+        const epoch_t start_epoch = (scan_start != nullptr) ? scan_start->epoch : 0;
+        const epoch_t end_epoch = (cursor != nullptr) ? cursor->epoch : 0;
+        result.advanced_epoch_distance = (scan_start == nullptr)
+                                             ? end_epoch
+                                             : ((end_epoch >= start_epoch) ? (end_epoch - start_epoch) : 0);
+
+        /* Retain only the checkpoint to preserve trimming invariants.
+         * If the checkpoint does not advance, do not retain an extra reference.
          */
-        std::vector<write_log_checkpoint_t> candidate_nodes;
-        candidate_nodes.reserve(scan_nodes.size());
+        if (cursor != nullptr && cursor != scan_start)
+            retainNodeLocked(cursor);
 
-        for (write_log_checkpoint_t node : scan_nodes)
-        {
-            if (node == nullptr || node->vector_data == nullptr)
-            {
-                continue;
-            }
+        slow_path_checked_count_ += static_cast<std::uint64_t>(scanned_nodes);
 
-            const float distance = distance_function(query_vector_data, node->vector_data, query_vector_dim);
-            if (distance < entry_max_distance)
-            {
-                WriteLogCandidate candidate;
-                candidate.distance = distance;
-                candidate.vector_id = node->vector_id;
-                candidate.vector_data = node->vector_data;
-                candidate.vector_data_size = node->vector_data_size;
-                candidate.aux_data_1 = node->aux_data_1;
-                candidate.aux_data_2 = node->aux_data_2;
-                candidate.node = node;
-
-                result.candidates.push_back(candidate);
-                candidate_nodes.push_back(node);
-            }
-        }
-
-        {
-            std::lock_guard<InternalMutex> log_guard(log_lock_);
-
-            /* Release scan-window pins first.
-             */
-            for (write_log_checkpoint_t node : scan_nodes)
-            {
-                releaseNodeLocked(node);
-            }
-
-            /* Re-pin candidate nodes and transfer ownership to the scan result.
-             */
-            for (write_log_checkpoint_t node : candidate_nodes)
-            {
-                retainNodeLocked(node);
-            }
-
-            result.pinned_nodes_ = std::move(candidate_nodes);
-            slow_path_checked_count_ += static_cast<std::uint64_t>(scan_nodes.size());
-        }
-
-        AKER_LOG_DEBUG << "[WriteLog] scan window completed: candidates=" << result.candidates.size();
+        AKER_LOG_DEBUG << "[WriteLog] scan window completed: scanned=" << scanned_nodes
+                      << " candidates=" << result.candidates.size()
+                      << " advanced_epoch_distance=" << result.advanced_epoch_distance;
 
         return result;
     }
@@ -504,8 +443,6 @@ namespace aker
     {
         /* Trim unreferenced head entries while preserving tail.
          */
-        std::lock_guard<InternalMutex> log_guard(log_lock_);
-
         const size_t before = log_entry_count_;
 
         write_log_checkpoint_t node = log_head_;
@@ -551,8 +488,6 @@ namespace aker
     {
         /* Clear entries, RR structures, and risk stats.
          */
-        std::lock_guard<InternalMutex> log_guard(log_lock_);
-
         write_log_checkpoint_t node = log_head_;
         while (node != nullptr)
         {
@@ -584,8 +519,6 @@ namespace aker
     {
         /* Update risk model for a newly inserted representative cache entry.
          */
-        std::lock_guard<InternalMutex> log_guard(log_lock_);
-
         assert(risk_factor >= 0.0);
         assert(risk_factor <= 1.0);
 
@@ -601,8 +534,6 @@ namespace aker
     {
         /* Update risk model when a representative cache entry is evicted.
          */
-        std::lock_guard<InternalMutex> log_guard(log_lock_);
-
         assert(risk_factor >= 0.0);
         assert(risk_factor <= 1.0);
 
@@ -623,8 +554,6 @@ namespace aker
     {
         /* Consume unseen distance after a checkpoint advances.
          */
-        std::lock_guard<InternalMutex> log_guard(log_lock_);
-
         risk_score_.total_unseen -= static_cast<double>(unseen_distance);
         if (risk_score_.total_unseen < 0.0)
         {
@@ -639,14 +568,12 @@ namespace aker
     bool
     RiskAwareWriteLog::shouldRunSlowPath() noexcept
     {
-        std::lock_guard<InternalMutex> log_guard(log_lock_);
         return (allowed_risk_ < risk_score_.current_risk);
     }
 
     void
     RiskAwareWriteLog::recordRefresh() noexcept
     {
-        std::lock_guard<InternalMutex> log_guard(log_lock_);
         refresh_count_++;
     }
 
@@ -655,8 +582,6 @@ namespace aker
     {
         /* Build a stable snapshot of metrics for telemetry export.
          */
-        std::lock_guard<InternalMutex> log_guard(log_lock_);
-
         WriteLogMetrics metrics;
         metrics.log_entry_count = log_entry_count_;
         metrics.latest_epoch = latest_epoch_;
@@ -686,8 +611,6 @@ namespace aker
     {
         /* Build a human-readable status snapshot.
          */
-        std::lock_guard<InternalMutex> log_guard(log_lock_);
-
         std::ostringstream oss;
         oss << "WriteLog status: total elements (" << log_entry_count_ << ")\n";
 
@@ -776,7 +699,6 @@ namespace aker
     {
         /* Release pinned scan nodes.
          */
-        std::lock_guard<InternalMutex> log_guard(log_lock_);
         for (write_log_checkpoint_t node : nodes)
         {
             releaseNodeLocked(node);
