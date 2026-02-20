@@ -123,7 +123,7 @@ namespace aker
     }
 
     void
-    RiskAwareWriteLog::retainNodeLocked(write_log_checkpoint_t node) noexcept
+    RiskAwareWriteLog::retainNode(write_log_checkpoint_t node) noexcept
     {
         if (node == nullptr)
         {
@@ -135,7 +135,7 @@ namespace aker
     }
 
     void
-    RiskAwareWriteLog::releaseNodeLocked(write_log_checkpoint_t node) noexcept
+    RiskAwareWriteLog::releaseNode(write_log_checkpoint_t node) noexcept
     {
         if (node == nullptr)
         {
@@ -162,7 +162,7 @@ namespace aker
     }
 
     void
-    RiskAwareWriteLog::recomputeRiskLocked() noexcept
+    RiskAwareWriteLog::recomputeRisk() noexcept
     {
         if (risk_score_.total_cache_entries <= 0.0)
         {
@@ -316,14 +316,14 @@ namespace aker
             return nullptr;
         }
 
-        retainNodeLocked(log_tail_);
+        retainNode(log_tail_);
         return log_tail_;
     }
 
     void
     RiskAwareWriteLog::releaseCheckpoint(write_log_checkpoint_t checkpoint) noexcept
     {
-        releaseNodeLocked(checkpoint);
+        releaseNode(checkpoint);
     }
 
     void
@@ -336,7 +336,7 @@ namespace aker
             return;
         }
 
-        releaseNodeLocked(checkpoint_slot);
+        releaseNode(checkpoint_slot);
         checkpoint_slot = new_checkpoint;
     }
 
@@ -427,7 +427,7 @@ namespace aker
          * If the checkpoint does not advance, do not retain an extra reference.
          */
         if (cursor != nullptr && cursor != scan_start)
-            retainNodeLocked(cursor);
+            retainNode(cursor);
 
         slow_path_checked_count_ += static_cast<std::uint64_t>(scanned_nodes);
 
@@ -526,7 +526,7 @@ namespace aker
         risk_score_.total_unseen += static_cast<double>(unseen_distance);
         risk_score_.total_cache_entries = static_cast<double>(cache_entry_count);
 
-        recomputeRiskLocked();
+        recomputeRisk();
     }
 
     void
@@ -546,7 +546,7 @@ namespace aker
 
         risk_score_.total_cache_entries = static_cast<double>(cache_entry_count);
 
-        recomputeRiskLocked();
+        recomputeRisk();
     }
 
     void
@@ -562,7 +562,7 @@ namespace aker
 
         risk_score_.total_cache_entries = static_cast<double>(cache_entry_count);
 
-        recomputeRiskLocked();
+        recomputeRisk();
     }
 
     bool
@@ -701,7 +701,7 @@ namespace aker
          */
         for (write_log_checkpoint_t node : nodes)
         {
-            releaseNodeLocked(node);
+            releaseNode(node);
         }
     }
 }

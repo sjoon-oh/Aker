@@ -20,17 +20,20 @@ namespace aker
         explicit ANNSCacheEntryStore(ANNSCacheContext* context) noexcept;
 
         /**
-         * @brief Resolves the given vector id to the root cache entry.
+         * @brief Resolves the given vector id to the root cache entry from storage.
+         *
+         * This helper only reads the lookup table and traverses the linked chain
+         * to return the root entry (prev == nullptr).
          */
-        anns_cache_entry_t* getCacheEntry(vector_id_t vector_id) noexcept;
+        anns_cache_entry_t* getCacheEntryFromStorage(vector_id_t vector_id) noexcept;
 
         /**
-         * @brief Legacy name for getCacheEntry().
+         * @brief Legacy name for getCacheEntryFromStorage().
          */
-        [[deprecated("use getCacheEntry()")]]
+        [[deprecated("use getCacheEntryFromStorage()")]]
         anns_cache_entry_t* getCEntry(vector_id_t vector_id) noexcept
         {
-            return getCacheEntry(vector_id);
+            return getCacheEntryFromStorage(vector_id);
         }
 
         /**
@@ -69,15 +72,15 @@ namespace aker
         /**
          * @brief Links a dummy entry to an existing root entry.
          */
-        bool linkCacheEntryLocked(anns_cache_entry_t* allocated_entry, vector_id_t found_id) noexcept;
+        bool linkCacheEntry(anns_cache_entry_t* allocated_entry, vector_id_t found_id) noexcept;
 
         /**
-         * @brief Legacy name for linkCacheEntryLocked().
+         * @brief Legacy name for linkCacheEntry().
          */
-        [[deprecated("use linkCacheEntryLocked()")]]
-        bool linkCEntryLocked(anns_cache_entry_t* allocated_entry, vector_id_t found_id) noexcept
+        [[deprecated("use linkCacheEntry()")]]
+        bool linkCEntry(anns_cache_entry_t* allocated_entry, vector_id_t found_id) noexcept
         {
-            return linkCacheEntryLocked(allocated_entry, found_id);
+            return linkCacheEntry(allocated_entry, found_id);
         }
 
     private:

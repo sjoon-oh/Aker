@@ -1,5 +1,26 @@
 #pragma once
 
+/* Mode selection rules.
+ *
+ * The cache supports three mutually exclusive compile-time modes.
+ * Exactly one mode must be enabled at build time.
+ */
+#ifndef AKER_STANDARD_MODE
+#define AKER_STANDARD_MODE 0
+#endif
+
+#ifndef AKER_ENABLE_PROXIMITY_MODE
+#define AKER_ENABLE_PROXIMITY_MODE 0
+#endif
+
+#ifndef AKER_ENABLE_POTLUCK_MODE
+#define AKER_ENABLE_POTLUCK_MODE 0
+#endif
+
+#if (AKER_STANDARD_MODE + AKER_ENABLE_PROXIMITY_MODE + AKER_ENABLE_POTLUCK_MODE) != 1
+#error "Invalid cache mode configuration: enable exactly one of AKER_STANDARD_MODE, AKER_ENABLE_PROXIMITY_MODE, or AKER_ENABLE_POTLUCK_MODE"
+#endif
+
 #include <cstddef>
 #include <cstdint>
 

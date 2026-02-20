@@ -14,7 +14,7 @@ namespace aker
     }
 
     anns_cache_entry_t*
-    ANNSCacheEntryStore::getCacheEntry(vector_id_t vector_id) noexcept
+    ANNSCacheEntryStore::getCacheEntryFromStorage(vector_id_t vector_id) noexcept
     {
         /* Resolves the entry ID to the root entry.
          * The root entry is defined as the head of the linked chain (prev == nullptr).
@@ -113,12 +113,12 @@ namespace aker
     }
 
     bool
-    ANNSCacheEntryStore::linkCacheEntryLocked(anns_cache_entry_t* allocated_entry, vector_id_t found_id) noexcept
+    ANNSCacheEntryStore::linkCacheEntry(anns_cache_entry_t* allocated_entry, vector_id_t found_id) noexcept
     {
         /* Links an allocated dummy entry to an existing root entry.
          * This preserves the original semantics.
          */
-        anns_cache_entry_t* root_entry = getCacheEntry(found_id);
+        anns_cache_entry_t* root_entry = getCacheEntryFromStorage(found_id);
         if (root_entry == nullptr)
             return false;
 

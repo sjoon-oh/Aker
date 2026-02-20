@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <array>
 #include <cassert>
+#include <cstdlib>
 #include <limits>
 #include <vector>
 #include <random>
@@ -23,6 +24,92 @@ namespace aker
             std::uniform_int_distribution<int> dist(min_value, max_exclusive - 1);
             return dist(rng);
         }
+
+#if defined(AKER_ENABLE_POTLUCK_MODE) && (AKER_ENABLE_POTLUCK_MODE != 0)
+        /* Helper: Frees a cache entry object itself (query vector + slot pointer array).
+         * Slot VectorSlot elements are intentionally not deleted here.
+         */
+        static inline void
+        destroyCacheEntryObject(anns_cache_entry_t* entry) noexcept
+        {
+            if (entry == nullptr)
+                return;
+
+            delete entry->query_vector;
+            entry->query_vector = nullptr;
+
+            free(entry->neighbors_list);
+            entry->neighbors_list = nullptr;
+
+            delete entry;
+        }
+
+        /* Helper: Purges an invalid cache entry immediately.
+         * This is used only in Potluck mode to avoid accumulating invalid representatives.
+         */
+        static inline void
+        purgeCacheEntryPotluck(
+            ANNSCacheContext* context,
+            anns_cache_entry_t* entry) noexcept
+        {
+            if (context == nullptr || entry == nullptr)
+                return;
+
+            /* Resolve to the root entry defensively. */
+            anns_cache_entry_t* root_entry = entry;
+            while (root_entry != nullptr && root_entry->prev != nullptr)
+                root_entry = root_entry->prev;
+
+            if (root_entry == nullptr || root_entry->query_vector == nullptr)
+                return;
+
+            const vector_id_t root_id = root_entry->query_vector->getVectorId();
+
+            /* Remove the representative from the approximate filter first.
+             * The filter uses tombstones so repeated deletes are safe.
+             */
+            context->apprx_filter->deleteVector(root_id);
+
+            /* Release pooled vectors referenced by the root entry.
+             * (Linked child entries do not own vector lists.)
+             */
+            if (root_entry->neighbors_list != nullptr)
+            {
+                for (size_t i = 0; i < static_cast<size_t>(root_entry->neighbors); i++)
+                {
+                    VectorSlot* slot = root_entry->neighbors_list[i];
+                    if (slot == nullptr)
+                        continue;
+
+                    context->vector_pool->releaseVectorReference(slot->getVectorId());
+                }
+            }
+
+            /* Remove linked child entries (if any). */
+            anns_cache_entry_t* child_entry = root_entry->next;
+            while (child_entry != nullptr)
+            {
+                const vector_id_t child_id = child_entry->query_vector->getVectorId();
+                anns_cache_entry_t* next = child_entry->next;
+
+                context->lookup_table->map.erase(child_id);
+                destroyCacheEntryObject(child_entry);
+
+                child_entry = next;
+            }
+
+            /* Remove the root entry from storage and free it. */
+            context->lookup_table->map.erase(root_id);
+            destroyCacheEntryObject(root_entry);
+
+            /* Potluck does not rely on eviction_strategy size for correctness,
+             * but we keep repr_entry_count consistent for telemetry.
+             */
+            context->repr_entry_count = context->lookup_table->map.size();
+
+            AKER_LOG_DEBUG << "[ANNSCacheSimilarity] potluck purged invalid entry: root_id=" << root_id;
+        }
+#endif
     }
 
     ANNSCacheSimilarityEngine::ANNSCacheSimilarityEngine(
@@ -36,7 +123,7 @@ namespace aker
     }
 
     bool
-    ANNSCacheSimilarityEngine::validateCacheEntryLocked(anns_cache_entry_t* entry) noexcept
+    ANNSCacheSimilarityEngine::validateCacheEntry(anns_cache_entry_t* entry) noexcept
     {
         /* Validates an entry by pushing invalid vectors to the tail.
          * If the number of valid vectors falls below intopk, the entry becomes invalid.
@@ -47,6 +134,13 @@ namespace aker
         {
             context_->stats.cache_miss++;
             context_->stats.cache_invalid_detect++;
+
+#if defined(AKER_ENABLE_POTLUCK_MODE) && (AKER_ENABLE_POTLUCK_MODE != 0)
+            /* Potluck Mode: purge invalid entries immediately so they do not linger as
+             * tombstoned representatives.
+             */
+            purgeCacheEntryPotluck(context_, entry);
+#endif
             return false;
         }
 
@@ -72,6 +166,13 @@ namespace aker
             context_->apprx_filter->deleteVector(entry->query_vector->getVectorId());
 
             is_valid = false;
+
+#if defined(AKER_ENABLE_POTLUCK_MODE) && (AKER_ENABLE_POTLUCK_MODE != 0)
+            /* Potluck Mode: purge immediately instead of keeping an invalid entry in storage.
+             */
+            purgeCacheEntryPotluck(context_, entry);
+            return false;
+#endif
         }
 
         if (invalid_count > 0)
@@ -106,7 +207,7 @@ namespace aker
     }
 
     anns_cache_entry_t*
-    ANNSCacheSimilarityEngine::getCacheEntryLocked(
+    ANNSCacheSimilarityEngine::getCacheEntry(
         vector_view_t query_vector_data,
         bool& similar_entry,
         bool& is_invalid,
@@ -121,11 +222,11 @@ namespace aker
         similar_entry = false;
         is_invalid = false;
 
-        anns_cache_entry_t* entry = entry_store_->getCacheEntry(query_vector_data.vector_id);
+        anns_cache_entry_t* entry = entry_store_->getCacheEntryFromStorage(query_vector_data.vector_id);
 
         if (entry != nullptr)
         {
-            bool is_valid = validateCacheEntryLocked(entry);
+            bool is_valid = validateCacheEntry(entry);
             if (!is_valid)
             {
                 is_invalid = true;
@@ -210,11 +311,11 @@ namespace aker
                 continue;
 
             vector_id_t vector_id = static_cast<vector_id_t>(labels[i]);
-            anns_cache_entry_t* found_entry = entry_store_->getCacheEntry(vector_id);
+            anns_cache_entry_t* found_entry = entry_store_->getCacheEntryFromStorage(vector_id);
             if (found_entry == nullptr)
                 continue;
 
-            bool is_valid = validateCacheEntryLocked(found_entry);
+            bool is_valid = validateCacheEntry(found_entry);
             if (!is_valid)
             {
                 last_candidate_invalid = true;
@@ -256,14 +357,19 @@ namespace aker
 
                 if (r < context_->parameter.tuning.dropout)
                 {
-                    /* Mark the entry invalid to be handled later by eviction.
-                     * This reproduces the original Potluck baseline behavior.
+                    /* Mark and purge the entry so that a dropped representative is removed
+                     * from both the storage table and the approximate filter.
                      */
                     found_entry->version = -10;
 
                     context_->stats.cache_dropout++;
                     context_->stats.cache_miss++;
                     context_->stats.recordHitHistory();
+
+                    /* Potluck Mode: immediately purge dropped entries so that
+                     * invalid representatives do not remain in storage.
+                     */
+                    purgeCacheEntryPotluck(context_, found_entry);
 
                     context_->stats.approx_added_counts.push_back(context_->apprx_filter->getAddedCounts());
                     context_->stats.approx_representative_counts.push_back(context_->apprx_filter->getRepresentativeVectorNumber());

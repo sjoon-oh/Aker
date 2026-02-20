@@ -224,17 +224,17 @@ namespace aker
         /**
          * @brief Exports latency series and derived summary.
          */
-        void exportLatencySeriesLocked(const std::string& directory_path) noexcept;
+        void exportLatencySeries(const std::string& directory_path) noexcept;
 
         /**
          * @brief Exports per-request cache history samples.
          */
-        void exportCacheHistoryLocked(const std::string& directory_path) noexcept;
+        void exportCacheHistory(const std::string& directory_path) noexcept;
 
         /**
          * @brief Exports hit ratio and approx filter histories.
          */
-        void exportDerivedHistoriesLocked(const std::string& directory_path) noexcept;
+        void exportDerivedHistories(const std::string& directory_path) noexcept;
     };
 
     /**

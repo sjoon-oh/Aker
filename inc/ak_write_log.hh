@@ -291,7 +291,7 @@ namespace aker
         /**
          * @brief Updates the derived risk score fields.
          */
-        void recomputeRiskLocked() noexcept;
+        void recomputeRisk() noexcept;
 
         /**
          * @brief Estimates the number of risky unseen log entries.
@@ -301,12 +301,12 @@ namespace aker
         /**
          * @brief Pins a node reference.
          */
-        void retainNodeLocked(write_log_checkpoint_t node) noexcept;
+        void retainNode(write_log_checkpoint_t node) noexcept;
 
         /**
          * @brief Releases a node reference.
          */
-        void releaseNodeLocked(write_log_checkpoint_t node) noexcept;
+        void releaseNode(write_log_checkpoint_t node) noexcept;
 
         /**
          * @brief Unpins nodes in a scan result.

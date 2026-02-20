@@ -149,24 +149,31 @@ namespace aker
 
         /* Required core parameters.
          */
+        const auto requireValue = [&](const char* name, const std::string& value) {
+            if (!value.empty())
+                return;
+            AKER_LOG_ERROR << "[ParameterParser] missing required parameter: " << name << " (file=" << file_path << ")";
+            assert(false);
+        };
+
         std::string dimension_str = getAny({"dimension", "vector_format.dimension", "vector_dim", "vector_format.vector_dim"});
-        assert(!dimension_str.empty());
+        requireValue("dimension", dimension_str);
         parameter.vector_format.dimension = static_cast<std::uint32_t>(std::stoul(dimension_str));
 
         std::string pool_size_str = getAny({"pool_size", "capacity.pool_size", "slot_pool_size", "vector_pool_size"});
-        assert(!pool_size_str.empty());
+        requireValue("pool_size", pool_size_str);
         parameter.capacity.pool_size = static_cast<size_t>(std::stoull(pool_size_str));
 
         std::string vector_in_bytes_str = getAny({"vector_in_bytes", "vector_format.vector_in_bytes", "vector_data_size", "vector_format.vector_data_size"});
-        assert(!vector_in_bytes_str.empty());
+        requireValue("vector_in_bytes", vector_in_bytes_str);
         parameter.vector_format.vector_in_bytes = static_cast<size_t>(std::stoull(vector_in_bytes_str));
 
         std::string in_topk_str = getAny({"in_topk", "capacity.in_topk", "vector_in_topk", "vector_intopk"});
-        assert(!in_topk_str.empty());
+        requireValue("in_topk", in_topk_str);
         parameter.capacity.in_topk = static_cast<size_t>(std::stoull(in_topk_str));
 
         std::string top_delta_str = getAny({"top_delta", "capacity.top_delta", "vector_extras"});
-        assert(!top_delta_str.empty());
+        requireValue("top_delta", top_delta_str);
         parameter.capacity.top_delta = static_cast<size_t>(std::stoull(top_delta_str));
 
         /* Optional legacy key: slot_list_size.
@@ -177,7 +184,12 @@ namespace aker
         {
             const size_t legacy_list_size = static_cast<size_t>(std::stoull(slot_list_size_str));
             const size_t derived_list_size = parameter.capacity.getSlotListSize();
-            assert(legacy_list_size == derived_list_size);
+            if (legacy_list_size != derived_list_size)
+            {
+                AKER_LOG_ERROR << "[ParameterParser] slot_list_size mismatch: legacy=" << legacy_list_size
+                              << " derived=" << derived_list_size;
+                assert(false);
+            }
         }
 
         /* Tuning parameters.
@@ -195,18 +207,25 @@ namespace aker
             parameter.tuning.dropout = 0.0f;
 
         std::string risk_thresh_str = getAny({"risk_thresh", "tuning.risk_thresh"});
-        assert(!risk_thresh_str.empty());
-        parameter.tuning.risk_thresh = std::stof(risk_thresh_str);
+        if (!risk_thresh_str.empty())
+            parameter.tuning.risk_thresh = std::stof(risk_thresh_str);
+        else
+            parameter.tuning.risk_thresh = 0.0f;
 
         std::string alpha_tighten_str = getAny({"alpha_tighten", "tuning.alpha_tighten"});
+        if (!alpha_tighten_str.empty())
+            parameter.tuning.alpha_tighten = std::stof(alpha_tighten_str);
+        else
+            parameter.tuning.alpha_tighten = 0.0f;
+
         std::string alpha_loosen_str = getAny({"alpha_loosen", "tuning.alpha_loosen"});
-        assert(!alpha_tighten_str.empty());
-        assert(!alpha_loosen_str.empty());
-        parameter.tuning.alpha_tighten = std::stof(alpha_tighten_str);
-        parameter.tuning.alpha_loosen = std::stof(alpha_loosen_str);
+        if (!alpha_loosen_str.empty())
+            parameter.tuning.alpha_loosen = std::stof(alpha_loosen_str);
+        else
+            parameter.tuning.alpha_loosen = 0.0f;
 
         std::string distance_metric_str = getAny({"distance_metric", "distance.distance_metric", "distance_type"});
-        assert(!distance_metric_str.empty());
+        requireValue("distance_metric", distance_metric_str);
 
         const std::string distance_metric_norm = toLower(distance_metric_str);
         if (distance_metric_norm == "l2")
@@ -214,22 +233,127 @@ namespace aker
         else if (distance_metric_norm == "ip")
             parameter.distance_metric = distance_metric_t::DISTANCE_METRIC_IP;
         else
+        {
+            AKER_LOG_ERROR << "[ParameterParser] invalid distance_metric: " << distance_metric_str;
             assert(false);
+        }
 
-        assert(parameter.tuning.alpha_loosen > 1.0f);
-        assert(parameter.tuning.alpha_tighten < 1.0f);
-
+        /* Mode-specific requirements and ignored options.
+         */
 #if defined(AKER_ENABLE_PROXIMITY_MODE) && (AKER_ENABLE_PROXIMITY_MODE != 0)
-        /* Proximity Mode requires a strictly positive global threshold.
+        /* Proximity Mode
+         * - Requires global_thresh (used for similarity checks).
+         * - Ignores dropout and write-log related parameters.
          */
-        assert(parameter.tuning.global_thresh > 0.0f);
+        requireValue("global_thresh", global_thresh_str);
+        if (parameter.tuning.global_thresh <= 0.0f)
+        {
+            AKER_LOG_ERROR << "[ParameterParser] proximity mode requires global_thresh > 0 (global_thresh="
+                          << parameter.tuning.global_thresh << ")";
+            assert(false);
+        }
+
+        if (!dropout_str.empty())
+        {
+            AKER_LOG_INFO << "[ParameterParser] proximity mode ignores dropout=" << dropout_str;
+            parameter.tuning.dropout = 0.0f;
+        }
+
+        if (!risk_thresh_str.empty())
+        {
+            AKER_LOG_INFO << "[ParameterParser] proximity mode ignores risk_thresh=" << risk_thresh_str;
+            parameter.tuning.risk_thresh = 0.0f;
+        }
+
+        if (!alpha_tighten_str.empty())
+        {
+            AKER_LOG_INFO << "[ParameterParser] proximity mode ignores alpha_tighten=" << alpha_tighten_str;
+            parameter.tuning.alpha_tighten = 0.0f;
+        }
+
+        if (!alpha_loosen_str.empty())
+        {
+            AKER_LOG_INFO << "[ParameterParser] proximity mode ignores alpha_loosen=" << alpha_loosen_str;
+            parameter.tuning.alpha_loosen = 0.0f;
+        }
+
 #elif defined(AKER_ENABLE_POTLUCK_MODE) && (AKER_ENABLE_POTLUCK_MODE != 0)
-        /* Potluck Mode requires an explicit dropout rate.
-         * The rate is interpreted as a percentage in [0, 100].
+        /* Potluck Mode
+         * - Uses global_thresh (always starts from 0.0) and tunes it at put().
+         * - Requires dropout rate in [0, 100].
          */
-        assert(!dropout_str.empty());
-        assert(parameter.tuning.dropout >= 0.0f);
-        assert(parameter.tuning.dropout <= 100.0f);
+        if (!global_thresh_str.empty())
+        {
+            AKER_LOG_INFO << "[ParameterParser] potluck mode ignores global_thresh=" << global_thresh_str
+                          << " (global_thresh is forced to 0.0 at startup)";
+        }
+        parameter.tuning.global_thresh = 0.0f;
+
+        requireValue("dropout", dropout_str);
+
+        if (parameter.tuning.dropout < 0.0f || parameter.tuning.dropout > 100.0f)
+        {
+            AKER_LOG_ERROR << "[ParameterParser] potluck mode requires dropout in [0, 100] (dropout="
+                          << parameter.tuning.dropout << ")";
+            assert(false);
+        }
+
+        /* Potluck threshold tuning uses alpha_tighten. */
+        requireValue("alpha_tighten", alpha_tighten_str);
+        if (parameter.tuning.alpha_tighten >= 1.0f)
+        {
+            AKER_LOG_ERROR << "[ParameterParser] potluck mode expects alpha_tighten < 1 (alpha_tighten="
+                          << parameter.tuning.alpha_tighten << ")";
+            assert(false);
+        }
+
+        if (!risk_thresh_str.empty())
+        {
+            AKER_LOG_INFO << "[ParameterParser] potluck mode ignores risk_thresh=" << risk_thresh_str;
+            parameter.tuning.risk_thresh = 0.0f;
+        }
+
+        if (!alpha_loosen_str.empty())
+        {
+            AKER_LOG_INFO << "[ParameterParser] potluck mode ignores alpha_loosen=" << alpha_loosen_str;
+            parameter.tuning.alpha_loosen = 0.0f;
+        }
+
+#else
+        /* Standard Mode
+         * - Uses per-entry adaptive thresholds.
+         * - Requires write-log parameters (risk_thresh, alpha_tighten, alpha_loosen).
+         * - Ignores global_thresh/dropout.
+         */
+        requireValue("risk_thresh", risk_thresh_str);
+        requireValue("alpha_tighten", alpha_tighten_str);
+        requireValue("alpha_loosen", alpha_loosen_str);
+
+        if (parameter.tuning.alpha_loosen <= 1.0f)
+        {
+            AKER_LOG_ERROR << "[ParameterParser] standard mode requires alpha_loosen > 1 (alpha_loosen="
+                          << parameter.tuning.alpha_loosen << ")";
+            assert(false);
+        }
+
+        if (parameter.tuning.alpha_tighten >= 1.0f)
+        {
+            AKER_LOG_ERROR << "[ParameterParser] standard mode requires alpha_tighten < 1 (alpha_tighten="
+                          << parameter.tuning.alpha_tighten << ")";
+            assert(false);
+        }
+
+        if (!global_thresh_str.empty())
+        {
+            AKER_LOG_INFO << "[ParameterParser] standard mode ignores global_thresh=" << global_thresh_str;
+            parameter.tuning.global_thresh = 0.0f;
+        }
+
+        if (!dropout_str.empty())
+        {
+            AKER_LOG_INFO << "[ParameterParser] standard mode ignores dropout=" << dropout_str;
+            parameter.tuning.dropout = 0.0f;
+        }
 #endif
 
         /* Emit a configuration snapshot for debugging.

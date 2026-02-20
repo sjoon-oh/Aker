@@ -28,8 +28,8 @@ namespace aker
      * This class exposes a stable public API while delegating implementation details
      * to internal modules (EntryStore / SimilarityEngine / Maintenance / Telemetry).
      *
-     * Lock policy: public API acquires the global cache lock and invokes *Locked()
-     * module methods. This refactor keeps the lock policy unchanged.
+     * Lock policy: public API acquires the global cache lock and invokes internal
+     * module methods that assume the lock is held. This refactor keeps the lock policy unchanged.
      */
     class ANNSCache
     {

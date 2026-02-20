@@ -242,7 +242,7 @@ namespace aker
         return errno == EEXIST;
     }
 
-    void ANNSCacheStats::exportLatencySeriesLocked(const std::string& directory_path) noexcept
+    void ANNSCacheStats::exportLatencySeries(const std::string& directory_path) noexcept
     {
         /* Write one CSV per key plus an aggregated summary.
          */
@@ -303,7 +303,7 @@ namespace aker
         }
     }
 
-    void ANNSCacheStats::exportCacheHistoryLocked(const std::string& directory_path) noexcept
+    void ANNSCacheStats::exportCacheHistory(const std::string& directory_path) noexcept
     {
         /* Export a concise per-request cache history.
          */
@@ -334,7 +334,7 @@ namespace aker
         file.close();
     }
 
-    void ANNSCacheStats::exportDerivedHistoriesLocked(const std::string& directory_path) noexcept
+    void ANNSCacheStats::exportDerivedHistories(const std::string& directory_path) noexcept
     {
         /* Export hit ratio and approx filter histories.
          */
@@ -378,9 +378,9 @@ namespace aker
         trace_directory_path_ = makeTraceDirectoryPath();
         ensureDirectoryExists(trace_directory_path_);
 
-        exportLatencySeriesLocked(trace_directory_path_);
-        exportCacheHistoryLocked(trace_directory_path_);
-        exportDerivedHistoriesLocked(trace_directory_path_);
+        exportLatencySeries(trace_directory_path_);
+        exportCacheHistory(trace_directory_path_);
+        exportDerivedHistories(trace_directory_path_);
 
         return trace_directory_path_;
     }

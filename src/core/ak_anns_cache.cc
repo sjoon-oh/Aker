@@ -42,6 +42,12 @@ namespace aker
           has_distance_function(false),
           has_activity(false)
     {
+#if defined(AKER_ENABLE_POTLUCK_MODE) && (AKER_ENABLE_POTLUCK_MODE != 0)
+        /* Potluck Mode: global_thresh always starts from 0.0 regardless of configuration.
+         * This matches the legacy Potluck baseline behavior.
+         */
+        parameter.tuning.global_thresh = 0.0f;
+#endif
     }
 
     ANNSCacheContext::~ANNSCacheContext() noexcept = default;
@@ -238,7 +244,7 @@ namespace aker
                 context_->has_distance_function = true;
             }
 
-            result_entry = similarity_engine_->getCacheEntryLocked(
+            result_entry = similarity_engine_->getCacheEntry(
                 query_vector_data, similar_entry, is_invalid, distance_function, query_vector_float.data());
 
             cache_entry_count = context_->eviction_strategy->getCurrSize();
@@ -275,7 +281,7 @@ namespace aker
         {
             std::lock_guard<SpinMutex> cache_guard(context_->cache_lock);
 
-            inserted = maintenance_->insertCacheEntryLocked(vector_id, entry, query_vector_data);
+            inserted = maintenance_->insertCacheEntry(vector_id, entry, query_vector_data);
 
             cache_entry_count = context_->eviction_strategy->getCurrSize();
             pool_size = context_->vector_pool->getSize();
@@ -308,7 +314,17 @@ namespace aker
         {
             std::lock_guard<SpinMutex> cache_guard(context_->cache_lock);
 
-            linked = entry_store_->linkCacheEntryLocked(allocated_entry, found_id);
+#if defined(AKER_STANDARD_MODE) && (AKER_STANDARD_MODE != 0)
+            linked = entry_store_->linkCacheEntry(allocated_entry, found_id);
+#else
+            /* Proximity/Potluck Mode: linked hits are disabled, so this API is a no-op.
+             * We still consume the allocated dummy entry to preserve ownership semantics
+             * (callers should not free entries after a successful link call).
+             */
+            destroyCacheEntry(allocated_entry);
+            (void)found_id;
+            linked = true;
+#endif
 
             cache_entry_count = context_->eviction_strategy->getCurrSize();
             pool_size = context_->vector_pool->getSize();
@@ -340,7 +356,7 @@ namespace aker
         {
             std::lock_guard<SpinMutex> cache_guard(context_->cache_lock);
 
-            maintenance_->markVectorDeletedLocked(vector_id);
+            maintenance_->markVectorDeleted(vector_id);
 
             cache_entry_count = context_->eviction_strategy->getCurrSize();
             pool_size = context_->vector_pool->getSize();
@@ -365,6 +381,14 @@ namespace aker
 
         ElapsedLatencyPair latency;
         latency.start();
+
+#if !defined(AKER_STANDARD_MODE) || (AKER_STANDARD_MODE == 0)
+        /* Proximity/Potluck Mode: write-log is disabled. */
+        (void)write_vector;
+        (void)distance_function;
+        (void)result_transform_callback;
+        return;
+#endif
 
         size_t cache_entry_count = 0;
         size_t pool_size = 0;
@@ -395,7 +419,7 @@ namespace aker
                 context_->has_distance_function = true;
             }
 
-            maintenance_->insertWriteLogEntryLocked(
+            maintenance_->insertWriteLogEntry(
                 write_vector,
                 distance_function,
                 result_transform_callback,
@@ -424,6 +448,13 @@ namespace aker
         ElapsedLatencyPair latency;
         latency.start();
 
+#if !defined(AKER_STANDARD_MODE) || (AKER_STANDARD_MODE == 0)
+        /* Proximity/Potluck Mode: write-log is disabled. */
+        (void)distance_function;
+        (void)result_transform_callback;
+        return;
+#endif
+
         size_t cache_entry_count = 0;
         size_t pool_size = 0;
         size_t approx_repr = 0;
@@ -440,7 +471,7 @@ namespace aker
                 context_->has_distance_function = true;
             }
 
-            maintenance_->processWriteLogEntriesLocked(distance_function, result_transform_callback);
+            maintenance_->processWriteLogEntries(distance_function, result_transform_callback);
 
             cache_entry_count = context_->eviction_strategy->getCurrSize();
             pool_size = context_->vector_pool->getSize();
@@ -461,21 +492,21 @@ namespace aker
         context_->has_activity = true;
 
         std::lock_guard<SpinMutex> cache_guard(context_->cache_lock);
-        maintenance_->resetCacheLocked();
+        maintenance_->resetCache();
     }
 
     void
     ANNSCache::stressTestInvalidateRandom(float percent) noexcept
     {
         std::lock_guard<SpinMutex> cache_guard(context_->cache_lock);
-        maintenance_->stressTestInvalidateRandomLocked(percent);
+        maintenance_->stressTestInvalidateRandom(percent);
     }
 
     void
     ANNSCache::collectPooledVectors(std::vector<VectorSlot*>& pooled_list) noexcept
     {
         std::lock_guard<SpinMutex> cache_guard(context_->cache_lock);
-        maintenance_->collectPooledVectorsLocked(pooled_list);
+        maintenance_->collectPooledVectors(pooled_list);
     }
 
     std::string
