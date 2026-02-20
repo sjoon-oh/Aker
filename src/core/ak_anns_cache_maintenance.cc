@@ -729,12 +729,29 @@ namespace aker
         ElapsedLatencyPair latency_int_4;
 
         latency_int_1.start();
+
+        /*
+         * Legacy-compatible risk model update:
+         * - Refresh repr_entry_count at the moment of the write-log insertion.
+         * - Each write-log insertion increases the aggregate unseen distance by
+         *   the current number of representative cache entries.
+         */
+        context_->repr_entry_count = context_->eviction_strategy->getCurrSize();
+
         context_->write_log->insertLogEntry(
             write_vector.vector_id,
             write_vector.vector_data,
             static_cast<size_t>(write_vector.vector_in_bytes),
             write_vector.aux_data_1,
             write_vector.aux_data_2);
+
+        if (context_->repr_entry_count > 0)
+        {
+            context_->write_log->addCacheEntryRisk(
+                0.0,
+                static_cast<epoch_t>(context_->repr_entry_count),
+                context_->repr_entry_count);
+        }
         latency_int_1.end();
         context_->stats.appendLatencySample(ANNSCacheStats::LatencyMetric::k_insert_write_log_entry_step_1, latency_int_1);
 
@@ -744,14 +761,18 @@ namespace aker
         context_->stats.appendLatencySample(ANNSCacheStats::LatencyMetric::k_insert_write_log_entry_step_2, latency_int_2);
 
         latency_int_3.start();
-        processWriteLogEntries(distance_function, result_transform_callback);
+        /*
+         * Legacy-compatible slow-path trigger for write-log insertion:
+         * The slow-path is evaluated immediately after the fast-path without
+         * read-count gating.
+         */
+        if (context_->write_log->shouldRunSlowPath())
+            runWriteLogSlowPath(distance_function, result_transform_callback);
         latency_int_3.end();
         context_->stats.appendLatencySample(ANNSCacheStats::LatencyMetric::k_insert_write_log_entry_step_3, latency_int_3);
 
         latency_int_4.start();
-#if defined(AKER_STANDARD_MODE) && (AKER_STANDARD_MODE != 0)
-        context_->write_log->trimUnreferencedHeadEntries();
-#endif
+        /* Legacy behavior: trimming runs during eviction only. */
         latency_int_4.end();
         context_->stats.appendLatencySample(ANNSCacheStats::LatencyMetric::k_insert_write_log_entry_step_4, latency_int_4);
 

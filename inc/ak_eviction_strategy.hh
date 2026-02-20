@@ -5,9 +5,7 @@
 
 #include <memory>
 #include <unordered_map>
-
-#include <boost/intrusive/list.hpp>
-#include <boost/lockfree/queue.hpp>
+#include <queue>
 
 #include "ak_vector_slot.hh"
 
@@ -83,7 +81,6 @@ namespace aker
          */
         EvictionStrategyFifo() noexcept
         {
-            fifo_queue_ = std::make_unique<boost::lockfree::queue<std::uint64_t>>(k_default_fifo_capacity);
             size_ = 0;
         }
 
@@ -97,14 +94,19 @@ namespace aker
          */
         bool nextEvictCandidate(vector_id_t* candidate_key) noexcept override
         {
-            vector_id_t key = 0;
-            bool success = fifo_queue_->pop(key);
+            if (fifo_queue_.empty())
+                return false;
 
-            if (success && candidate_key != nullptr)
+            vector_id_t key = fifo_queue_.front();
+            fifo_queue_.pop();
+
+            if (candidate_key != nullptr)
                 *candidate_key = key;
 
-            size_--;
-            return success;
+            if (size_ > 0)
+                size_--;
+
+            return true;
         }
 
         /**
@@ -112,8 +114,20 @@ namespace aker
          */
         bool addEvictCandidate(vector_id_t candidate_key) noexcept override
         {
+            /* std::queue may allocate; guard against exceptions because this
+            * method is declared noexcept.
+            */
+            try
+            {
+                fifo_queue_.push(candidate_key);
+            }
+            catch (...)
+            {
+                return false;
+            }
+
             size_++;
-            return fifo_queue_->push(candidate_key);
+            return true;
         }
 
         /**
@@ -126,104 +140,6 @@ namespace aker
         }
 
     private:
-        static constexpr std::size_t k_default_fifo_capacity = 1024;
-
-        std::unique_ptr<boost::lockfree::queue<std::uint64_t>> fifo_queue_;
-    };
-
-    /**
-     * @brief LRU eviction strategy.
-     */
-    class EvictionStrategyLru final : public EvictionStrategy
-    {
-    public:
-        /**
-         * @brief Constructs an LRU strategy.
-         */
-        EvictionStrategyLru() noexcept
-        {
-            lru_list_.clear();
-            lru_map_.clear();
-            size_ = 0;
-        }
-
-        /**
-         * @brief Destructor.
-         */
-        ~EvictionStrategyLru() noexcept override
-        {
-            lru_list_.clear();
-            lru_map_.clear();
-        }
-
-        /**
-         * @brief Pops the least-recently used candidate.
-         */
-        bool nextEvictCandidate(vector_id_t* candidate_key) noexcept override
-        {
-            if (lru_list_.empty())
-                return false;
-
-            Node& node = lru_list_.back();
-
-            if (candidate_key != nullptr)
-                *candidate_key = node.key;
-
-            lru_list_.pop_back();
-
-            size_--;
-            return true;
-        }
-
-        /**
-         * @brief Adds a new candidate to the LRU list.
-         */
-        bool addEvictCandidate(vector_id_t candidate_key) noexcept override
-        {
-            auto it = lru_map_.find(candidate_key);
-            if (it != lru_map_.end())
-                return false;
-
-            size_++;
-
-            std::unique_ptr<Node> node = std::make_unique<Node>(candidate_key);
-            lru_list_.push_front(*node);
-            lru_map_[candidate_key] = std::move(node);
-
-            return true;
-        }
-
-        /**
-         * @brief Updates a candidate as recently accessed.
-         */
-        bool recentlyAccessed(vector_id_t candidate_key) noexcept override
-        {
-            auto it = lru_map_.find(candidate_key);
-            if (it == lru_map_.end())
-                return false;
-
-            Node& node = *(it->second);
-            lru_list_.erase(lru_list_.iterator_to(node));
-            lru_list_.push_front(node);
-
-            return true;
-        }
-
-    private:
-        /**
-         * @brief Node stored in the intrusive LRU list.
-         */
-        struct Node : public boost::intrusive::list_base_hook<>
-        {
-            explicit Node(vector_id_t k)
-                : key(k)
-            {
-            }
-
-            vector_id_t key;
-        };
-
-        boost::intrusive::list<Node> lru_list_;
-        std::unordered_map<vector_id_t, std::unique_ptr<Node>> lru_map_;
+        std::queue<vector_id_t> fifo_queue_;
     };
 }
