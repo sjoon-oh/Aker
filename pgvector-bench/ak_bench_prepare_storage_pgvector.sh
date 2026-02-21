@@ -61,8 +61,13 @@ fi
 
 CONFIG_PATH="$(resolve_config_path "${CONFIG_PATH}")"
 
-require_cmd initdb
-require_cmd pg_ctl
+# Current refactor requires Docker mode by default.
+prepare_docker_environment "${CONFIG_PATH}"
+
+if [[ -z "${AK_BENCH_DOCKER_CONTAINER_INTERNAL:-}" ]]; then
+    require_cmd initdb
+    require_cmd pg_ctl
+fi
 
 DATASTORE_VALUE="$(ini_get_value "${CONFIG_PATH}" "postgres" "datastore")"
 DATASTORE_PATH="$(resolve_datastore_path "${DATASTORE_VALUE}")"
@@ -109,7 +114,7 @@ pgctl_stop "${DATASTORE_PATH}"
 rm -rf "${DATASTORE_PATH}" "${DATASTORE_CLEAN_PATH}"
 mkdir -p "$(dirname -- "${DATASTORE_PATH}")"
 
-initdb -D "${DATASTORE_PATH}" -U "${PGUSER}"
+pg_initdb "${DATASTORE_PATH}" "${PGUSER}"
 
 # Start postgres.
 export_env_from_ini "${CONFIG_PATH}"
@@ -141,3 +146,7 @@ cp -r "${DATASTORE_PATH}" "${DATASTORE_CLEAN_PATH}"
 
 log_info "Storage preparation completed"
 log_info "Clean snapshot created: ${DATASTORE_CLEAN_PATH}"
+
+docker_cleanup_tmp_traces
+
+maybe_shutdown_docker_container "${CONFIG_PATH}"

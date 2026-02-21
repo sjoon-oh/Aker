@@ -50,6 +50,9 @@ fi
 
 CONFIG_PATH="$(resolve_config_path "${CONFIG_PATH}")"
 
+# Current refactor requires Docker mode by default.
+prepare_docker_environment "${CONFIG_PATH}"
+
 mkdir -p "${OUTPUT_ROOT}"
 
 RUN_ID="$(date +%Y%m%d_%H%M%S)"
@@ -86,14 +89,18 @@ fi
 #
 run_bench_cli_numactl run-search-workload --config "${CONFIG_PATH}" --output-dir "${RUN_DIR}"
 
+# Wait before shutdown to allow Aker to export traces (default: 600s when AKER_CONFIG_PATH is set).
+maybe_wait_for_aker_trace_export
+
 #
 # Collect newly created /tmp trace directories.
 #
+maybe_stop_postgres "${CONFIG_PATH}"
+
 collect_new_tmp_traces "${TMP_BEFORE_LIST}" "${RUN_DIR}/tmp_traces" "${MERGED_TMP_DIR}"
 
-#
-# Stop postgres if we are managing PGDATA.
-#
-maybe_stop_postgres "${CONFIG_PATH}"
+docker_cleanup_tmp_traces
+
+maybe_shutdown_docker_container "${CONFIG_PATH}"
 
 printf "[OK] Search-workload finished: %s\n" "${RUN_DIR}"

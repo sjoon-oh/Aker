@@ -63,6 +63,9 @@ fi
 
 CONFIG_PATH="$(resolve_config_path "${CONFIG_PATH}")"
 
+# Current refactor requires Docker mode by default.
+prepare_docker_environment "${CONFIG_PATH}"
+
 mkdir -p "${OUTPUT_ROOT}"
 
 RUN_ID="$(date +%Y%m%d_%H%M%S)"
@@ -109,5 +112,9 @@ fi
 collect_new_tmp_traces "${TMP_BEFORE_LIST}" "${RUN_DIR}/tmp_traces" "${MERGED_TMP_DIR}"
 
 maybe_stop_postgres "${CONFIG_PATH}"
+
+docker_cleanup_tmp_traces
+
+maybe_shutdown_docker_container "${CONFIG_PATH}"
 
 printf "[OK] Workload generation finished: %s\n" "${RUN_DIR}"

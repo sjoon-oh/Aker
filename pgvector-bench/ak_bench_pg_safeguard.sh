@@ -10,10 +10,26 @@ set -euo pipefail
 # - export environment variables from INI so postgres can read them via getenv
 # - collect new /tmp trace directories produced during a benchmark run
 #
-# This file is meant to be sourced by the sample run scripts.
+# Docker support (current refactor):
+# - PostgreSQL server is executed inside a container.
+# - Host-side scripts still manage the workload pipeline and storage directories.
+# - To enable Docker mode you MUST specify a Docker image name.
+#   (Non-Docker execution is treated as legacy and requires explicit opt-in.)
 #
 
 BENCH_ROOT="$(pwd)"
+PROJECT_ROOT="$(cd "${BENCH_ROOT}/.." && pwd)"
+
+# Docker runtime state (set by prepare_docker_environment()).
+# NOTE: Do not reuse the same names as user-facing env vars.
+AK_BENCH_DOCKER_IMAGE_INTERNAL=""
+AK_BENCH_DOCKER_CONTAINER_INTERNAL=""
+AK_BENCH_DOCKER_NETWORK_INTERNAL="host"
+AK_BENCH_DOCKER_OS_USER_INTERNAL="akerbench"
+AK_BENCH_DOCKER_NUMA_NODE_INTERNAL="0"
+AK_BENCH_DOCKER_REMOVE_CONTAINER_ON_EXIT_INTERNAL="0"
+
+declare -a AK_BENCH_DOCKER_ENV_ARGS=()
 
 resolve_config_path() {
     #
@@ -202,15 +218,233 @@ require_cmd() {
     fi
 }
 
+sanitize_container_component() {
+    #
+    # Convert an arbitrary string to a Docker container-name-safe token.
+    #
+    local raw="$1"
+    printf "%s" "${raw}" \
+        | tr '[:upper:]' '[:lower:]' \
+        | sed -E 's/[^a-z0-9_.-]+/_/g'
+}
+
+docker_get_image() {
+    local config_path="$1"
+
+    if [[ -n "${AK_BENCH_DOCKER_IMAGE:-}" ]]; then
+        printf "%s" "${AK_BENCH_DOCKER_IMAGE}"
+        return 0
+    fi
+
+    local ini_image
+    ini_image="$(ini_get_value "${config_path}" "docker" "image" || true)"
+    printf "%s" "${ini_image}"
+}
+
+docker_is_legacy_opt_in() {
+    [[ "${AK_BENCH_ALLOW_LEGACY_NO_DOCKER:-0}" == "1" ]]
+}
+
+docker_require_image_or_legacy() {
+    local config_path="$1"
+
+    local image
+    image="$(docker_get_image "${config_path}")"
+
+    if [[ -n "${image}" ]]; then
+        return 0
+    fi
+
+    # Guard against the old pattern: docker.enabled=1 without specifying an image.
+    local enabled
+    enabled="$(ini_get_value "${config_path}" "docker" "enabled" || true)"
+    if [[ "${enabled}" == "1" ]]; then
+        log_err "docker.enabled=1 is deprecated. You must specify docker.image (or set AK_BENCH_DOCKER_IMAGE)."
+        exit 1
+    fi
+
+    if docker_is_legacy_opt_in; then
+        log_warn "Docker image not specified; running in legacy (non-Docker) mode due to AK_BENCH_ALLOW_LEGACY_NO_DOCKER=1"
+        return 0
+    fi
+
+    log_err "Docker mode is required. Specify a Docker image name via:"
+    log_err "  - environment: export AK_BENCH_DOCKER_IMAGE=<image:tag>"
+    log_err "  - or config INI: [docker] image = <image:tag>"
+    log_err "To run legacy host Postgres, set AK_BENCH_ALLOW_LEGACY_NO_DOCKER=1 (not recommended for review)."
+    exit 1
+}
+
+docker_get_network() {
+    local config_path="$1"
+
+    if [[ -n "${AK_BENCH_DOCKER_NETWORK:-}" ]]; then
+        printf "%s" "${AK_BENCH_DOCKER_NETWORK}"
+        return 0
+    fi
+
+    local ini_network
+    ini_network="$(ini_get_value "${config_path}" "docker" "network" || true)"
+    if [[ -z "${ini_network}" ]]; then
+        ini_network="host"
+    fi
+    printf "%s" "${ini_network}"
+}
+
+docker_get_numa_node() {
+    local config_path="$1"
+
+    if [[ -n "${AK_BENCH_DOCKER_NUMA_NODE:-}" ]]; then
+        printf "%s" "${AK_BENCH_DOCKER_NUMA_NODE}"
+        return 0
+    fi
+
+    local ini_node
+    ini_node="$(ini_get_value "${config_path}" "docker" "numa_node" || true)"
+    if [[ -z "${ini_node}" ]]; then
+        ini_node="0"
+    fi
+
+    printf "%s" "${ini_node}"
+}
+
+docker_get_remove_container_on_exit() {
+    local config_path="$1"
+
+    if [[ -n "${AK_BENCH_DOCKER_REMOVE_CONTAINER_ON_EXIT:-}" ]]; then
+        printf "%s" "${AK_BENCH_DOCKER_REMOVE_CONTAINER_ON_EXIT}"
+        return 0
+    fi
+
+    local ini_value
+    ini_value="$(ini_get_value "${config_path}" "docker" "remove_container_on_exit" || true)"
+    if [[ -n "${ini_value}" ]]; then
+        printf "%s" "${ini_value}"
+        return 0
+    fi
+
+    # Legacy alias: rm_on_exit means removing the *container*, not the image.
+    ini_value="$(ini_get_value "${config_path}" "docker" "rm_on_exit" || true)"
+    if [[ -n "${ini_value}" ]]; then
+        printf "%s" "${ini_value}"
+        return 0
+    fi
+
+    printf "0"
+}
+
+docker_get_container_name() {
+    local config_path="$1"
+    local image_tag="$2"
+    local host_port="$3"
+
+    if [[ -n "${AK_BENCH_DOCKER_CONTAINER_NAME:-}" ]]; then
+        printf "%s" "${AK_BENCH_DOCKER_CONTAINER_NAME}"
+        return 0
+    fi
+
+    local ini_name
+    ini_name="$(ini_get_value "${config_path}" "docker" "container_name" || true)"
+    if [[ -n "${ini_name}" ]]; then
+        printf "%s" "${ini_name}"
+        return 0
+    fi
+
+    local token
+    token="$(sanitize_container_component "${image_tag}")"
+    printf "akerbench_%s_%s" "${token}" "${host_port}"
+}
+
+docker_is_enabled_for_config() {
+    local config_path="$1"
+    local image
+    image="$(docker_get_image "${config_path}")"
+    [[ -n "${image}" ]]
+}
+
+docker_ensure_container_running() {
+    local config_path="$1"
+
+    if ! docker_is_enabled_for_config "${config_path}"; then
+        return 0
+    fi
+
+    require_cmd docker
+
+    local image_tag
+    image_tag="$(docker_get_image "${config_path}")"
+
+    local host_port
+    host_port="$(ini_get_value "${config_path}" "postgres" "port" || true)"
+    if [[ -z "${host_port}" ]]; then
+        host_port="5432"
+    fi
+
+    local container_name
+    container_name="$(docker_get_container_name "${config_path}" "${image_tag}" "${host_port}")"
+
+    local network_mode
+    network_mode="$(docker_get_network "${config_path}")"
+
+    local run_script
+    run_script="${PROJECT_ROOT}/docker/scripts/run_container.sh"
+    if [[ ! -x "${run_script}" ]]; then
+        log_err "Docker run script not found or not executable: ${run_script}"
+        exit 1
+    fi
+
+    "${run_script}" "${image_tag}" "${container_name}" "${network_mode}" "${host_port}"
+
+    AK_BENCH_DOCKER_IMAGE_INTERNAL="${image_tag}"
+    AK_BENCH_DOCKER_CONTAINER_INTERNAL="${container_name}"
+    AK_BENCH_DOCKER_NETWORK_INTERNAL="${network_mode}"
+    AK_BENCH_DOCKER_OS_USER_INTERNAL="${AK_BENCH_DOCKER_OS_USER:-akerbench}"
+    AK_BENCH_DOCKER_NUMA_NODE_INTERNAL="$(docker_get_numa_node "${config_path}")"
+    AK_BENCH_DOCKER_REMOVE_CONTAINER_ON_EXIT_INTERNAL="$(docker_get_remove_container_on_exit "${config_path}")"
+}
+
+prepare_docker_environment() {
+    #
+    # Initialize Docker runtime state for a given benchmark config.
+    # If Docker is required (default), this validates docker.image is set.
+    #
+    local config_path="$1"
+
+    docker_require_image_or_legacy "${config_path}"
+
+    if docker_is_enabled_for_config "${config_path}"; then
+        docker_ensure_container_running "${config_path}"
+    fi
+}
+
+docker_exec_raw() {
+    #
+    # Execute a shell command inside the benchmark container.
+    #
+    local inner_cmd="$1"
+
+    docker exec -u "${AK_BENCH_DOCKER_OS_USER_INTERNAL}" \
+        "${AK_BENCH_DOCKER_CONTAINER_INTERNAL}" \
+        bash -lc "cd '${BENCH_ROOT}' && ${inner_cmd}"
+}
+
+docker_exec_raw_with_env() {
+    #
+    # Execute a shell command inside the benchmark container with environment variables
+    # propagated from [env] section.
+    #
+    local inner_cmd="$1"
+
+    docker exec -u "${AK_BENCH_DOCKER_OS_USER_INTERNAL}" \
+        "${AK_BENCH_DOCKER_ENV_ARGS[@]}" \
+        "${AK_BENCH_DOCKER_CONTAINER_INTERNAL}" \
+        bash -lc "cd '${BENCH_ROOT}' && ${inner_cmd}"
+}
+
 export_env_from_ini() {
     #
     # Export environment variables under [env] section so PostgreSQL can read them via getenv.
     # Keys must be valid shell variable names.
-    #
-    # Example:
-    #   [env]
-    #   AKER_CONFIG_PATH = /path/to/aker.json
-    #   TOPKACHE_CONFIG = /path/to/topkache.json
     #
     # Args:
     #   $1: config_path
@@ -219,12 +453,18 @@ export_env_from_ini() {
     local config_path="$1"
     local aker_config_override="${2:-}"
 
+    AK_BENCH_DOCKER_ENV_ARGS=()
+
     while IFS=$'\t' read -r key value; do
         if [[ -z "${key}" ]]; then
             continue
         fi
         export "${key}=${value}"
         log_info "Exported env: ${key}=${value}"
+
+        if [[ -n "${AK_BENCH_DOCKER_CONTAINER_INTERNAL}" ]]; then
+            AK_BENCH_DOCKER_ENV_ARGS+=( -e "${key}=${value}" )
+        fi
     done < <(ini_list_section_kv "${config_path}" "env" || true)
 
     if [[ -n "${aker_config_override}" ]]; then
@@ -232,18 +472,47 @@ export_env_from_ini() {
         resolved="$(resolve_path_under_root "${aker_config_override}")"
         export AKER_CONFIG_PATH="${resolved}"
         log_info "Exported env override: AKER_CONFIG_PATH=${resolved}"
+
+        if [[ -n "${AK_BENCH_DOCKER_CONTAINER_INTERNAL}" ]]; then
+            AK_BENCH_DOCKER_ENV_ARGS+=( -e "AKER_CONFIG_PATH=${resolved}" )
+        fi
     fi
+}
+
+pg_initdb() {
+    #
+    # Initialize a new PGDATA directory.
+    #
+    # Args:
+    #   $1: datastore_path
+    #   $2: db_superuser
+    #
+    local datastore_path="$1"
+    local db_superuser="$2"
+
+    if [[ -n "${AK_BENCH_DOCKER_CONTAINER_INTERNAL}" ]]; then
+        docker_exec_raw "initdb -D '${datastore_path}' -U '${db_superuser}'"
+        return 0
+    fi
+
+    require_cmd initdb
+    initdb -D "${datastore_path}" -U "${db_superuser}"
 }
 
 pgctl_stop() {
     local datastore_path="$1"
 
-    require_cmd pg_ctl
-
     if [[ ! -d "${datastore_path}" ]]; then
         log_warn "datastore path not found; skip pg_ctl stop: ${datastore_path}"
         return 0
     fi
+
+    if [[ -n "${AK_BENCH_DOCKER_CONTAINER_INTERNAL}" ]]; then
+        docker_exec_raw "pg_ctl -D '${datastore_path}' -m fast stop >/dev/null 2>&1 || true"
+        return 0
+    fi
+
+    require_cmd pg_ctl
 
     # Stop only the instance using this data directory.
     pg_ctl -D "${datastore_path}" -m fast stop >/dev/null 2>&1 || true
@@ -254,14 +523,31 @@ pgctl_start() {
     local psql_config_path="$2"
     local pg_log_path="$3"
 
-    require_cmd pg_ctl
-
     if [[ ! -d "${datastore_path}" ]]; then
         log_err "datastore path not found; cannot pg_ctl start: ${datastore_path}"
         exit 1
     fi
 
     mkdir -p "$(dirname -- "${pg_log_path}")"
+
+    if [[ -n "${AK_BENCH_DOCKER_CONTAINER_INTERNAL}" ]]; then
+        local numa_node="${AK_BENCH_DOCKER_NUMA_NODE_INTERNAL}"
+
+        local extra_opts=""
+        if [[ -n "${psql_config_path}" ]]; then
+            extra_opts="${extra_opts} -o --config-file=${psql_config_path}"
+        fi
+
+        docker_exec_raw_with_env "\
+            set -euo pipefail; \
+            numa_prefix=(); \
+            if [[ -n '${numa_node}' ]]; then numa_prefix=(numactl --cpunodebind='${numa_node}' --membind='${numa_node}'); fi; \
+            \"\${numa_prefix[@]}\" pg_ctl -D '${datastore_path}' -l '${pg_log_path}' ${extra_opts} start >/dev/null\
+        "
+        return 0
+    fi
+
+    require_cmd pg_ctl
 
     if [[ -n "${psql_config_path}" ]]; then
         pg_ctl -D "${datastore_path}" -l "${pg_log_path}" -o "--config-file=${psql_config_path}" start >/dev/null
@@ -378,6 +664,8 @@ restore_clean_snapshot_and_start() {
     local purpose="$2"  # for log text only
     local aker_config_override="${3:-}"
 
+    prepare_docker_environment "${config_path}"
+
     local datastore_path
     datastore_path="$(ini_get_value "${config_path}" "postgres" "datastore")"
     datastore_path="$(resolve_datastore_path "${datastore_path}")"
@@ -444,7 +732,6 @@ restore_clean_snapshot_and_start() {
     pg_wait_ready "${host}" "${port}" "${user}"
 }
 
-
 restore_clean_snapshot_and_start_no_cache_drop() {
     #
     # Same as restore_clean_snapshot_and_start(), but does NOT drop OS page cache.
@@ -454,6 +741,8 @@ restore_clean_snapshot_and_start_no_cache_drop() {
     local config_path="$1"
     local purpose="$2"  # for log text only
     local aker_config_override="${3:-}"
+
+    prepare_docker_environment "${config_path}"
 
     local datastore_path
     datastore_path="$(ini_get_value "${config_path}" "postgres" "datastore")"
@@ -519,6 +808,97 @@ restore_clean_snapshot_and_start_no_cache_drop() {
     pg_wait_ready "${host}" "${port}" "${user}"
 }
 
+maybe_stop_postgres() {
+    #
+    # Stop PostgreSQL if we are managing PGDATA (postgres.datastore is configured).
+    #
+    # This helper is intentionally a no-op when postgres.datastore is empty, so that
+    # callers can support externally managed PostgreSQL instances.
+    #
+    # Args:
+    #   $1: config_path
+    #
+    local config_path="$1"
+
+    if [[ -z "${config_path}" ]]; then
+        log_warn "Config path is empty; skip maybe_stop_postgres"
+        return 0
+    fi
+
+    local datastore_value
+    datastore_value="$(ini_get_value "${config_path}" "postgres" "datastore")"
+    datastore_value="$(resolve_datastore_path "${datastore_value}")"
+    if [[ -z "${datastore_value}" ]]; then
+        return 0
+    fi
+
+    pgctl_stop "${datastore_value}"
+}
+
+maybe_wait_for_aker_trace_export() {
+    #
+    # Aker trace export can be expensive. To avoid prematurely shutting down the server
+    # (or container) before traces are written, optionally wait before stopping.
+    #
+    # Policy:
+    # - If AK_BENCH_TRACE_EXPORT_WAIT_SEC is set, use it (0 disables).
+    # - Otherwise, if AKER_CONFIG_PATH is set, default to 600 seconds.
+    #
+    local wait_sec="${AK_BENCH_TRACE_EXPORT_WAIT_SEC:-}"
+
+    if [[ -z "${wait_sec}" ]]; then
+        if [[ -n "${AKER_CONFIG_PATH:-}" ]]; then
+            wait_sec="600"
+        else
+            wait_sec="0"
+        fi
+    fi
+
+    if [[ "${wait_sec}" == "0" ]]; then
+        return 0
+    fi
+
+    log_info "Waiting ${wait_sec} seconds for trace export before shutdown"
+    sleep "${wait_sec}"
+}
+
+docker_cleanup_tmp_traces() {
+    #
+    # Remove trace artifacts under /tmp inside the container to keep it reusable.
+    #
+    if [[ -z "${AK_BENCH_DOCKER_CONTAINER_INTERNAL}" ]]; then
+        return 0
+    fi
+
+    docker_exec_raw "\
+        set -euo pipefail; \
+        shopt -s nullglob; \
+        rm -rf /tmp/aker_trace_* /tmp/topkache_trace_* /tmp/aker_*trace* /tmp/topkache_*trace* || true\
+    "
+}
+
+maybe_shutdown_docker_container() {
+    #
+    # Stop the benchmark container if Docker mode is enabled.
+    # By default we keep the container for reuse; removal is optional.
+    #
+    local config_path="$1"
+
+    if [[ -z "${AK_BENCH_DOCKER_CONTAINER_INTERNAL}" ]]; then
+        return 0
+    fi
+
+    require_cmd docker
+
+    log_info "Stopping benchmark container (not removing image): ${AK_BENCH_DOCKER_CONTAINER_INTERNAL}"
+    docker stop "${AK_BENCH_DOCKER_CONTAINER_INTERNAL}" >/dev/null 2>&1 || true
+
+    if [[ "${AK_BENCH_DOCKER_REMOVE_CONTAINER_ON_EXIT_INTERNAL}" == "1" ]]; then
+        log_warn "Removing container due to remove_container_on_exit=1: ${AK_BENCH_DOCKER_CONTAINER_INTERNAL}"
+        docker rm "${AK_BENCH_DOCKER_CONTAINER_INTERNAL}" >/dev/null 2>&1 || true
+    fi
+}
+
 capture_tmp_trace_list() {
     #
     # Capture current /tmp trace candidates into a sorted list file.
@@ -529,13 +909,28 @@ capture_tmp_trace_list() {
     tmp_file="${out_path}.tmp"
     rm -f "${tmp_file}"
 
-    # Use nullglob so non-matching globs expand to nothing.
+    if [[ -n "${AK_BENCH_DOCKER_CONTAINER_INTERNAL}" ]]; then
+        docker_exec_raw "\
+            set -euo pipefail; \
+            shopt -s nullglob; \
+            for p in /tmp/aker_trace_* /tmp/topkache_trace_* /tmp/aker_*trace* /tmp/topkache_*trace*; do \
+                if [[ -e \"\${p}\" ]]; then printf '%s\\n' \"\${p}\"; fi; \
+            done | sort -u\
+        " > "${out_path}" || true
+
+        if [[ ! -f "${out_path}" ]]; then
+            : > "${out_path}"
+        fi
+        return 0
+    fi
+
+    # Host mode (legacy)
     shopt -s nullglob
 
     local patterns=(
-        /tmp/aker_trace_* 
-        /tmp/topkache_trace_* 
-        /tmp/aker_*trace* 
+        /tmp/aker_trace_*
+        /tmp/topkache_trace_*
+        /tmp/aker_*trace*
         /tmp/topkache_*trace*
     )
 
@@ -606,9 +1001,15 @@ collect_new_tmp_traces() {
             merged_target="${merged_dest_dir}/${base}_$(date +%s%N)"
         fi
 
-        log_info "Collecting new /tmp trace: ${path} -> ${run_target}"
-        cp -a "${path}" "${run_target}"
-        cp -a "${path}" "${merged_target}"
+        if [[ -n "${AK_BENCH_DOCKER_CONTAINER_INTERNAL}" ]]; then
+            log_info "Collecting new container /tmp trace: ${path} -> ${run_target}"
+            docker cp "${AK_BENCH_DOCKER_CONTAINER_INTERNAL}:${path}" "${run_target}" >/dev/null 2>&1 || true
+            docker cp "${AK_BENCH_DOCKER_CONTAINER_INTERNAL}:${path}" "${merged_target}" >/dev/null 2>&1 || true
+        else
+            log_info "Collecting new /tmp trace: ${path} -> ${run_target}"
+            cp -a "${path}" "${run_target}"
+            cp -a "${path}" "${merged_target}"
+        fi
 
     done < "${new_list_path}"
 

@@ -55,6 +55,9 @@ fi
 
 CONFIG_PATH="$(resolve_config_path "${CONFIG_PATH}")"
 
+# Current refactor requires Docker mode by default.
+prepare_docker_environment "${CONFIG_PATH}"
+
 mkdir -p "${OUTPUT_ROOT}"
 
 RUN_ID="$(date +%Y%m%d_%H%M%S)"
@@ -95,8 +98,14 @@ run_bench_cli_numactl run-stress-workload \
     --output-dir "${RUN_DIR}" \
     --invalidate "${INVALIDATE_FRACTION}"
 
-collect_new_tmp_traces "${TMP_BEFORE_LIST}" "${RUN_DIR}/tmp_traces" "${MERGED_TMP_DIR}"
+maybe_wait_for_aker_trace_export
 
 maybe_stop_postgres "${CONFIG_PATH}"
+
+collect_new_tmp_traces "${TMP_BEFORE_LIST}" "${RUN_DIR}/tmp_traces" "${MERGED_TMP_DIR}"
+
+docker_cleanup_tmp_traces
+
+maybe_shutdown_docker_container "${CONFIG_PATH}"
 
 printf "[OK] Stress-workload finished: %s\n" "${RUN_DIR}"
