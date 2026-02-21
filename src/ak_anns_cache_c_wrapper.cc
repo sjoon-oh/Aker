@@ -66,6 +66,31 @@ static inline char* asChar(aker::anns_cache_entry_t* e)
     return reinterpret_cast<char*>(e);
 }
 
+/**
+ * Adapts a C ABI distance function pointer to the internal std::function signature.
+ *
+ * The internal cache treats vector buffers as read-only (const pointers).
+ * The C ABI historically used non-const pointers, so we forward using const_cast.
+ * Callers must NOT mutate the input buffers.
+ */
+static inline aker::distance_function_t adaptDistanceFunction(
+    float (*distance_function)(uint8_t*, uint8_t*, size_t))
+{
+    if (distance_function == nullptr)
+        return aker::distance_function_t{};
+
+    return [distance_function](
+        const aker::vector_data_t* vector1,
+        const aker::vector_data_t* vector2,
+        size_t dimension) -> float
+    {
+        return distance_function(
+            const_cast<aker::vector_data_t*>(vector1),
+            const_cast<aker::vector_data_t*>(vector2),
+            dimension);
+    };
+}
+
 void akerImportAnnsCacheConfig(char* path, anns_cache_parameter_c_t* parameter)
 {
     if (path == nullptr || parameter == nullptr)
@@ -304,12 +329,14 @@ char* akerGetCacheEntry(
     aker::vector_view_t* query_vector_data = asVectorView(query_vector_view_wrapper);
     aker::ANNSCache* cache = asCache(wrapper->anns_cache);
 
+    aker::distance_function_t distance_function_cb = adaptDistanceFunction(distance_function);
+
     aker::anns_cache_entry_t* found_entry =
         cache->getCacheEntry(
             *query_vector_data,
             *similar_entry,
             *is_invalid,
-            distance_function);
+            distance_function_cb);
 
     return reinterpret_cast<char*>(found_entry);
 }
@@ -416,7 +443,7 @@ void akerInsertWriteLogEntry(
     aker::ANNSCache* cache = asCache(wrapper->anns_cache);
     cache->insertWriteLogEntry(
         *asVectorView(vector_view_wrapper),
-        distance_function,
+        adaptDistanceFunction(distance_function),
         result_transform_callback);
 }
 
@@ -426,7 +453,7 @@ void akerProcessWriteLogEntries(
     void (*result_transform_callback)(uint64_t, uint8_t*, size_t, uint64_t, uint64_t))
 {
     aker::ANNSCache* cache = asCache(wrapper->anns_cache);
-    cache->processWriteLogEntries(distance_function, result_transform_callback);
+    cache->processWriteLogEntries(adaptDistanceFunction(distance_function), result_transform_callback);
 }
 
 void akerMarkVectorDeleted(anns_cache_c_wrapper_t* wrapper, uint64_t vector_id)

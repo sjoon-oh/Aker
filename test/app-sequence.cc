@@ -1,7 +1,7 @@
 #include <boost/program_options.hpp>
 #include <iostream>
 
-#include "utils/SequenceGen.hh"
+#include "utils/ak_sequence_gen.hh"
 
 namespace po = boost::program_options;
 
@@ -34,6 +34,15 @@ main(int argc, char* argv[])
     double insert_ratio = vm["insert"].as<double>();
     double update_ratio = vm["update"].as<double>();
     double read_ratio = vm["read"].as<double>();
+
+    // Force read-only workload (all READ operations).
+    // Keep CLI options for compatibility, but ignore insert/update ratios.
+    constexpr double INSERT_RATIO = 0.0;
+    constexpr double UPDATE_RATIO = 0.0;
+    constexpr double READ_RATIO = 1.0;
+    insert_ratio = INSERT_RATIO;
+    update_ratio = UPDATE_RATIO;
+    read_ratio = READ_RATIO;
 
     YcsbSeqGenerator seq_gen;
     seq_gen.setGenerator(total_record_count, "zipfian", insert_ratio, update_ratio, read_ratio);

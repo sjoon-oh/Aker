@@ -119,6 +119,8 @@ class SearchWorkloadRunner:
                 logging.info("Progress: %.2f%% completed.", percentage)
                 show_progress_percentage += 1
 
+        workload_end = time.perf_counter()
+
         #
         # Aggregate stats.
         #
@@ -134,8 +136,10 @@ class SearchWorkloadRunner:
         p99_insert_latency = 0.0
 
         avg_recall = float(np.mean(recalls)) if recalls else 0.0
-
-        total_time = sum(search_latencies)
+        #
+        # QPS (end-to-end): keep the legacy definition (total wall time for the workload).
+        #
+        total_time = workload_end - workload_start
         qps = len(results) / total_time if total_time > 0 else 0.0
 
         search_params = ""

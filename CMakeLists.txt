@@ -1,83 +1,80 @@
 cmake_minimum_required(VERSION 3.10)
 
-project(TopKcache LANGUAGES C CXX)
+project(Aker LANGUAGES C CXX)
 
-# Build configuration
-# - Use C++17
-# - Keep default build type as Debug for single-config generators
+# -----------------------------
+# Basic build settings
+# -----------------------------
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 set(CMAKE_VERBOSE_MAKEFILE ON)
 
-# Use Debug as the default for single-config generators.
+# Default build type for single-config generators.
 if(NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Debug CACHE STRING "Build type" FORCE)
     set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS Debug Release RelWithDebInfo MinSizeRel)
 endif()
 
-# Compile options
-# - Preserve the existing behavior (warnings suppressed by default)
-# - Provide a switch to enable warnings when needed
+# Do not embed build-tree RPATH. Executables must locate libaker.so via the
+# system dynamic loader search paths (e.g., ldconfig-managed paths or LD_LIBRARY_PATH).
+set(CMAKE_SKIP_BUILD_RPATH TRUE)
+set(CMAKE_BUILD_WITH_INSTALL_RPATH FALSE)
+set(CMAKE_INSTALL_RPATH "")
+
+# Output directories (under the project root).
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${PROJECT_SOURCE_DIR}/build/lib")
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${PROJECT_SOURCE_DIR}/build/bin")
+
+# Keep the existing behavior: warnings suppressed by default.
 option(AKER_SUPPRESS_WARNINGS "Suppress compiler warnings (-w)" ON)
 
-# Mode switches
-# - Standard Mode: adaptive threshold update (default)
-# - Proximity Mode: fixed threshold per entry (compile-time)
+# Cache threshold policy mode (compile-time)
 option(AKER_ENABLE_PROXIMITY_MODE "Enable Proximity Mode (fixed threshold per entry)" OFF)
-
-# - Potluck Mode: global threshold tuning + dropout (compile-time)
 option(AKER_ENABLE_POTLUCK_MODE "Enable Potluck Mode (global threshold tuning + dropout)" OFF)
 
-add_library(aker_build_options INTERFACE)
-
-# Debug symbols and no optimization in Debug.
-target_compile_options(aker_build_options INTERFACE
-    $<$<AND:$<CONFIG:Debug>,$<COMPILE_LANGUAGE:CXX>>:-O0;-g3;-ggdb>
-)
-
-if(AKER_SUPPRESS_WARNINGS)
-    target_compile_options(aker_build_options INTERFACE
-        $<$<COMPILE_LANGUAGE:CXX>:-w>
-    )
-else()
-    target_compile_options(aker_build_options INTERFACE
-        $<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic>
-    )
+if(AKER_ENABLE_PROXIMITY_MODE AND AKER_ENABLE_POTLUCK_MODE)
+    message(FATAL_ERROR "AKER_ENABLE_PROXIMITY_MODE and AKER_ENABLE_POTLUCK_MODE are mutually exclusive")
 endif()
 
-# Dependencies
 find_package(Threads REQUIRED)
 
-# Boost
+# -----------------------------
+# Boost (shared-only)
+# -----------------------------
 set(BOOST_ROOT "/opt/boost_1_86" CACHE PATH "Boost root directory")
-set(Boost_USE_STATIC_LIBS ON)
+set(Boost_USE_STATIC_LIBS OFF)
 set(Boost_USE_MULTITHREADED ON)
 set(Boost_USE_STATIC_RUNTIME OFF)
 
-find_package(Boost 1.80 REQUIRED COMPONENTS program_options)
+find_package(Boost 1.80 REQUIRED COMPONENTS
+    program_options
+    log
+    log_setup
+    date_time
+    thread
+    system
+    filesystem
+    regex
+    atomic
+    chrono
+)
 
+# -----------------------------
 # FAISS
+# -----------------------------
 set(FAISS_ROOT "" CACHE PATH "FAISS installation prefix")
 
 find_path(FAISS_INCLUDE_DIR
     NAMES faiss/Index.h
-    PATHS
-        "${FAISS_ROOT}/include"
-        /usr/local/include
-        /usr/include
+    PATHS "${FAISS_ROOT}/include" /usr/local/include /usr/include
     REQUIRED
 )
 
 find_library(FAISS_LIBRARY
     NAMES faiss
-    PATHS
-        "${FAISS_ROOT}/lib"
-        "${FAISS_ROOT}/lib64"
-        /usr/local/lib
-        /usr/lib
-        /usr/lib64
+    PATHS "${FAISS_ROOT}/lib" "${FAISS_ROOT}/lib64" /usr/local/lib /usr/lib /usr/lib64
     REQUIRED
 )
 
@@ -87,148 +84,100 @@ set_target_properties(faiss::faiss PROPERTIES
     INTERFACE_INCLUDE_DIRECTORIES "${FAISS_INCLUDE_DIR}"
 )
 
-# Sources
-file(GLOB_RECURSE HDR_FILES
+# -----------------------------
+# Aker shared library (libaker.so)
+# -----------------------------
+file(GLOB_RECURSE AKER_SRC_FILES
     CONFIGURE_DEPENDS
-    "${PROJECT_SOURCE_DIR}/inc/*.h" "${PROJECT_SOURCE_DIR}/inc/*.hh"
-    "${PROJECT_SOURCE_DIR}/inc/utils/*.h" "${PROJECT_SOURCE_DIR}/inc/utils/*.hh"
-    "${PROJECT_SOURCE_DIR}/inc/core/*.h" "${PROJECT_SOURCE_DIR}/inc/core/*.hh"
+    "${PROJECT_SOURCE_DIR}/src/*.c"
+    "${PROJECT_SOURCE_DIR}/src/*.cc"
 )
 
-file(GLOB_RECURSE SRC_FILES
-    CONFIGURE_DEPENDS
-    "${PROJECT_SOURCE_DIR}/src/*.c" "${PROJECT_SOURCE_DIR}/src/*.cc"
-    "${PROJECT_SOURCE_DIR}/src/utils/*.c" "${PROJECT_SOURCE_DIR}/src/utils/*.cc"
-    "${PROJECT_SOURCE_DIR}/src/core/*.c" "${PROJECT_SOURCE_DIR}/src/core/*.cc"
-)
+add_library(aker SHARED ${AKER_SRC_FILES})
 
-set(TOPKACHE_TARGET topkache)
-
-# Object library
-# - Avoid compiling the same sources twice for shared/static
-add_library(${TOPKACHE_TARGET}_obj OBJECT ${SRC_FILES})
-set_target_properties(${TOPKACHE_TARGET}_obj PROPERTIES POSITION_INDEPENDENT_CODE ON)
-
-target_compile_features(${TOPKACHE_TARGET}_obj PUBLIC cxx_std_17)
-
-target_include_directories(${TOPKACHE_TARGET}_obj
+target_include_directories(aker
     PUBLIC
         "${PROJECT_SOURCE_DIR}/inc"
         "${PROJECT_SOURCE_DIR}/extern"
 )
 
-target_link_libraries(${TOPKACHE_TARGET}_obj
-    PUBLIC
-        aker_build_options
+# Debug symbols and no optimization in Debug.
+target_compile_options(aker PRIVATE
+    $<$<AND:$<CONFIG:Debug>,$<COMPILE_LANGUAGE:CXX>>:-O0;-g3;-ggdb>
 )
 
-# Cache threshold policy mode (compile-time)
-if(AKER_ENABLE_PROXIMITY_MODE AND AKER_ENABLE_POTLUCK_MODE)
-    message(FATAL_ERROR "AKER_ENABLE_PROXIMITY_MODE and AKER_ENABLE_POTLUCK_MODE are mutually exclusive")
+if(AKER_SUPPRESS_WARNINGS)
+    target_compile_options(aker PRIVATE
+        $<$<COMPILE_LANGUAGE:CXX>:-w>
+    )
+else()
+    target_compile_options(aker PRIVATE
+        $<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic>
+    )
 endif()
 
+# Compile-time mode selection (exactly one must be enabled by the header contract).
 if(AKER_ENABLE_POTLUCK_MODE)
-    target_compile_definitions(${TOPKACHE_TARGET}_obj PUBLIC
+    target_compile_definitions(aker PUBLIC
         AKER_ENABLE_PROXIMITY_MODE=0
         AKER_ENABLE_POTLUCK_MODE=1
         AKER_STANDARD_MODE=0
     )
 elseif(AKER_ENABLE_PROXIMITY_MODE)
-    target_compile_definitions(${TOPKACHE_TARGET}_obj PUBLIC
+    target_compile_definitions(aker PUBLIC
         AKER_ENABLE_PROXIMITY_MODE=1
         AKER_ENABLE_POTLUCK_MODE=0
         AKER_STANDARD_MODE=0
     )
 else()
-    target_compile_definitions(${TOPKACHE_TARGET}_obj PUBLIC
+    target_compile_definitions(aker PUBLIC
         AKER_ENABLE_PROXIMITY_MODE=0
         AKER_ENABLE_POTLUCK_MODE=0
         AKER_STANDARD_MODE=1
     )
 endif()
 
-# Shared library
-add_library(${TOPKACHE_TARGET} SHARED $<TARGET_OBJECTS:${TOPKACHE_TARGET}_obj>)
-set_target_properties(${TOPKACHE_TARGET} PROPERTIES
-    LIBRARY_OUTPUT_DIRECTORY "${PROJECT_SOURCE_DIR}/build/lib"
-    OUTPUT_NAME "topkache"
+# Help Boost headers select shared linking where relevant.
+target_compile_definitions(aker PRIVATE
+    BOOST_LOG_DYN_LINK
+    BOOST_LOG_SETUP_DYN_LINK
 )
 
-target_link_libraries(${TOPKACHE_TARGET}
-    PUBLIC
+# Link dependencies into libaker.so.
+# - Keep these PRIVATE so executables can link only to libaker.so.
+target_link_libraries(aker
+    PRIVATE
         Threads::Threads
-        Boost::program_options
         faiss::faiss
-)
-
-# Static library
-add_library(${TOPKACHE_TARGET}_static STATIC $<TARGET_OBJECTS:${TOPKACHE_TARGET}_obj>)
-set_target_properties(${TOPKACHE_TARGET}_static PROPERTIES
-    ARCHIVE_OUTPUT_DIRECTORY "${PROJECT_SOURCE_DIR}/build/lib"
-    OUTPUT_NAME "topkache"
-)
-
-target_link_libraries(${TOPKACHE_TARGET}_static
-    PUBLIC
-        Threads::Threads
         Boost::program_options
-        faiss::faiss
+        Boost::log
+        Boost::log_setup
+        Boost::date_time
+        Boost::thread
+        Boost::system
+        Boost::filesystem
+        Boost::regex
+        Boost::atomic
+        Boost::chrono
 )
 
-# Test and example binaries
-# - Compile only the test sources and link against the library
-option(TEST_BINARY "Build test binaries" ON)
-
-if(TEST_BINARY)
-    file(GLOB_RECURSE TEST_RUNS_HDRS
-        CONFIGURE_DEPENDS
-        "${PROJECT_SOURCE_DIR}/test/runs/*.h" "${PROJECT_SOURCE_DIR}/test/runs/*.hh"
-    )
-
-    add_executable(test-topkache
-        "${PROJECT_SOURCE_DIR}/test/test-topkache.cc"
-        "${PROJECT_SOURCE_DIR}/test/test-common.hh"
-        ${TEST_RUNS_HDRS}
-    )
-
-    set_target_properties(test-topkache PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY "${PROJECT_SOURCE_DIR}/build/bin"
-    )
-
-    target_include_directories(test-topkache PUBLIC "${PROJECT_SOURCE_DIR}/inc")
-    target_link_libraries(test-topkache PUBLIC ${TOPKACHE_TARGET})
-
-    add_executable(test-topkache-c
-        "${PROJECT_SOURCE_DIR}/test/test-topkache-c.c"
-    )
-
-    set_target_properties(test-topkache-c PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY "${PROJECT_SOURCE_DIR}/build/bin"
-        LINKER_LANGUAGE CXX
-    )
-
-    target_include_directories(test-topkache-c PUBLIC "${PROJECT_SOURCE_DIR}/inc")
-    target_link_libraries(test-topkache-c PUBLIC ${TOPKACHE_TARGET})
-
-    add_executable(faiss-hnsw-microbenchmark
-        "${PROJECT_SOURCE_DIR}/test/faiss-microbenchmark.cc"
-    )
-
-    set_target_properties(faiss-hnsw-microbenchmark PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY "${PROJECT_SOURCE_DIR}/build/bin"
-    )
-
-    target_include_directories(faiss-hnsw-microbenchmark PUBLIC "${PROJECT_SOURCE_DIR}/inc")
-    target_link_libraries(faiss-hnsw-microbenchmark PUBLIC ${TOPKACHE_TARGET})
-endif()
-
+# -----------------------------
+# app-sequence (kept for sequence generator usage)
+# -----------------------------
 add_executable(app-sequence
     "${PROJECT_SOURCE_DIR}/test/app-sequence.cc"
 )
 
-set_target_properties(app-sequence PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${PROJECT_SOURCE_DIR}/build/bin"
+target_include_directories(app-sequence
+    PRIVATE
+        "${PROJECT_SOURCE_DIR}/inc"
+        "${PROJECT_SOURCE_DIR}/extern"
 )
 
-target_include_directories(app-sequence PUBLIC "${PROJECT_SOURCE_DIR}/inc")
-target_link_libraries(app-sequence PUBLIC ${TOPKACHE_TARGET})
+# Link only to libaker.so. Runtime discovery of libaker.so is via loader search paths.
+target_link_libraries(app-sequence PRIVATE aker)
+
+# app-sequence directly uses Boost.Program_options (CLI parsing). The GNU linker
+# does not resolve executable symbols through DT_NEEDED dependencies of a shared
+# library by default, so we must link this component explicitly.
+target_link_libraries(app-sequence PRIVATE Boost::program_options)

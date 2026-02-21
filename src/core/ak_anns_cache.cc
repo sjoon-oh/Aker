@@ -24,7 +24,7 @@ namespace aker
 {
     namespace
     {
-        static constexpr size_t k_write_log_scan_thresh = 64;
+        static constexpr size_t k_write_log_scan_thresh = 16;
     }
 
     ANNSCacheContext::ANNSCacheContext(const anns_cache_config_t& parameter_info) noexcept

@@ -5,6 +5,9 @@
 
 #include <stddef.h>
 
+// Needed for std::sqrt() used by cosine distance implementations.
+#include <cmath>
+
 #ifdef __AVX512F__
 #include <immintrin.h>
 #endif
@@ -266,7 +269,7 @@ static inline float cosine_dist_plain(const float *a, const float *b, size_t n) 
         na  += va * va;
         nb  += vb * vb;
     }
-    return 1.0f - (float)(dot / (sqrt(na) * sqrt(nb)));
+    return 1.0f - (float)(dot / (std::sqrt(na) * std::sqrt(nb)));
 }
 
 #ifdef __SSE__
@@ -294,7 +297,7 @@ static inline float cosine_dist_sse(const float *a, const float *b, size_t n) {
         double va = a[i], vb = b[i];
         dot += va * vb; na += va * va; nb += vb * vb;
     }
-    return 1.0f - (float)(dot / (sqrt(na) * sqrt(nb)));
+    return 1.0f - (float)(dot / (std::sqrt(na) * std::sqrt(nb)));
 }
 #endif
 
@@ -323,7 +326,7 @@ static inline float cosine_dist_avx(const float *a, const float *b, size_t n) {
         double va = a[i], vb = b[i];
         dot += va * vb; na += va * va; nb += vb * vb;
     }
-    return 1.0f - (float)(dot / (sqrt(na) * sqrt(nb)));
+    return 1.0f - (float)(dot / (std::sqrt(na) * std::sqrt(nb)));
 }
 #endif
 
@@ -352,7 +355,7 @@ static inline float cosine_dist_avx2(const float *a, const float *b, size_t n) {
         double va = a[i], vb = b[i];
         dot += va * vb; na += va * va; nb += vb * vb;
     }
-    return 1.0f - (float)(dot / (sqrt(na) * sqrt(nb)));
+    return 1.0f - (float)(dot / (std::sqrt(na) * std::sqrt(nb)));
 }
 #endif
 
@@ -381,7 +384,7 @@ static inline float cosine_dist_avx512(const float *a, const float *b, size_t n)
         double va = a[i], vb = b[i];
         dot += va * vb; na += va * va; nb += vb * vb;
     }
-    return 1.0f - (float)(dot / (sqrt(na) * sqrt(nb)));
+    return 1.0f - (float)(dot / (std::sqrt(na) * std::sqrt(nb)));
 }
 #endif
 

@@ -1,9 +1,3 @@
-[submodule "apps/sptag"]
-	path = apps/sptag
-	url = https://github.com/microsoft/SPTAG
-[submodule "apps/pgvector/pgvector"]
-	path = apps/pgvector/pgvector
-	url = https://github.com/pgvector/pgvector.git
 [submodule "extern/YCSB-C"]
 	path = extern/YCSB-C
 	url = https://github.com/basicthinker/YCSB-C
