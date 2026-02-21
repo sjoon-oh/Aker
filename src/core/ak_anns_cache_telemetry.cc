@@ -205,7 +205,7 @@ namespace aker
     {
         /* Export all telemetry under a single /tmp timestamped directory.
          */
-        if (!context_->has_activity)
+        if (!context_->has_activity_since_last_export)
         {
             return;
         }
@@ -272,5 +272,8 @@ namespace aker
                 file.close();
             }
         }
+
+        /* Mark the current telemetry snapshot as exported. */
+        context_->has_activity_since_last_export = false;
     }
 }

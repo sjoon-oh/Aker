@@ -40,7 +40,6 @@ SEARCH_CFG="${CONFIG_DIR}/search_workload_hnsw.ini"
 "${BENCH_ROOT}/ak_bench_run_search_workload.sh" --config "${SEARCH_CFG}" --output-dir "${RUN_OUT}"
 
 # -------- Stress-workload (HNSW) --------
-# NOTE: This requires the DB to provide topkache_invalidate_random(fraction).
 STRESS_CFG="${CONFIG_DIR}/stress_workload_hnsw.ini"
 INVALIDATE_FRACTION="0.10"
 "${BENCH_ROOT}/ak_bench_run_stress_workload.sh" \

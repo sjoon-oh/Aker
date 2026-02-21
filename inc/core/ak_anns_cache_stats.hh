@@ -192,7 +192,7 @@ namespace aker
         virtual const char* getLatencyKey(LatencyMetric metric) const noexcept;
 
         /**
-         * @brief Exports all telemetry files under /tmp/aker_trace_<timestamp>/.
+         * @brief Exports all telemetry files under /tmp/aker_trace_<timestamp>_pid<PID>_gen<G>/.
          *
          * @return The created trace directory path.
          */

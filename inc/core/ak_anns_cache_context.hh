@@ -119,6 +119,14 @@ namespace aker
         bool has_activity;
 
         /**
+         * @brief Tracks whether the cache observed any activity since the last trace export.
+         *
+         * This flag is used to avoid exporting identical telemetry snapshots multiple times
+         * when exportTraceToFiles() is called repeatedly without new cache operations.
+         */
+        bool has_activity_since_last_export;
+
+        /**
          * @brief Constructs a context and initializes owned components.
          */
         explicit ANNSCacheContext(const anns_cache_config_t& parameter_info) noexcept;

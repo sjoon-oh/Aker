@@ -40,7 +40,8 @@ namespace aker
           try_read_count(0),
           inst_distance_function(),
           has_distance_function(false),
-          has_activity(false)
+          has_activity(false),
+          has_activity_since_last_export(false)
     {
 #if defined(AKER_ENABLE_POTLUCK_MODE) && (AKER_ENABLE_POTLUCK_MODE != 0)
         /* Potluck Mode: global_thresh always starts from 0.0 regardless of configuration.
@@ -91,7 +92,7 @@ namespace aker
     {
         /* Export a final trace snapshot on destruction.
          */
-        if (context_ == nullptr || !context_->has_activity)
+        if (context_ == nullptr || !context_->has_activity_since_last_export)
         {
             return;
         }
@@ -210,8 +211,6 @@ namespace aker
         /* Public API wrapper.
          * Measures end-to-end latency and records a concise history sample.
          */
-        context_->has_activity = true;
-
         ElapsedLatencyPair latency;
         latency.start();
 
@@ -234,6 +233,8 @@ namespace aker
 
         {
             std::lock_guard<SpinMutex> cache_guard(context_->cache_lock);
+            context_->has_activity = true;
+            context_->has_activity_since_last_export = true;
 
             /* Potluck tuning requires a distance function instance at put().
              * We capture the first seen distance function to keep the insert path deterministic.
@@ -268,8 +269,6 @@ namespace aker
         anns_cache_entry_t* entry,
         vector_view_t query_vector_data) noexcept
     {
-        context_->has_activity = true;
-
         ElapsedLatencyPair latency;
         latency.start();
 
@@ -280,6 +279,8 @@ namespace aker
 
         {
             std::lock_guard<SpinMutex> cache_guard(context_->cache_lock);
+            context_->has_activity = true;
+            context_->has_activity_since_last_export = true;
 
             inserted = maintenance_->insertCacheEntry(vector_id, entry, query_vector_data);
 
@@ -301,8 +302,6 @@ namespace aker
     bool
     ANNSCache::linkCacheEntry(anns_cache_entry_t* allocated_entry, vector_id_t found_id) noexcept
     {
-        context_->has_activity = true;
-
         ElapsedLatencyPair latency;
         latency.start();
 
@@ -313,6 +312,8 @@ namespace aker
 
         {
             std::lock_guard<SpinMutex> cache_guard(context_->cache_lock);
+            context_->has_activity = true;
+            context_->has_activity_since_last_export = true;
 
 #if defined(AKER_STANDARD_MODE) && (AKER_STANDARD_MODE != 0)
             linked = entry_store_->linkCacheEntry(allocated_entry, found_id);
@@ -344,8 +345,6 @@ namespace aker
     void
     ANNSCache::markVectorDeleted(vector_id_t vector_id) noexcept
     {
-        context_->has_activity = true;
-
         ElapsedLatencyPair latency;
         latency.start();
 
@@ -355,6 +354,8 @@ namespace aker
 
         {
             std::lock_guard<SpinMutex> cache_guard(context_->cache_lock);
+            context_->has_activity = true;
+            context_->has_activity_since_last_export = true;
 
             maintenance_->markVectorDeleted(vector_id);
 
@@ -377,8 +378,6 @@ namespace aker
         distance_function_t distance_function,
         result_transform_callback_t result_transform_callback) noexcept
     {
-        context_->has_activity = true;
-
         ElapsedLatencyPair latency;
         latency.start();
 
@@ -409,6 +408,8 @@ namespace aker
 
         {
             std::lock_guard<SpinMutex> cache_guard(context_->cache_lock);
+            context_->has_activity = true;
+            context_->has_activity_since_last_export = true;
 
             /* Potluck tuning requires a distance function instance at put().
              * We capture the first seen distance function to keep the insert path deterministic.
@@ -443,8 +444,6 @@ namespace aker
         distance_function_t distance_function,
         result_transform_callback_t result_transform_callback) noexcept
     {
-        context_->has_activity = true;
-
         ElapsedLatencyPair latency;
         latency.start();
 
@@ -461,6 +460,8 @@ namespace aker
 
         {
             std::lock_guard<SpinMutex> cache_guard(context_->cache_lock);
+            context_->has_activity = true;
+            context_->has_activity_since_last_export = true;
 
             /* Potluck tuning requires a distance function instance at put().
              * We capture the first seen distance function to keep the insert path deterministic.
@@ -489,9 +490,9 @@ namespace aker
     void
     ANNSCache::resetCache() noexcept
     {
-        context_->has_activity = true;
-
         std::lock_guard<SpinMutex> cache_guard(context_->cache_lock);
+        context_->has_activity = true;
+        context_->has_activity_since_last_export = true;
         maintenance_->resetCache();
     }
 
@@ -499,6 +500,8 @@ namespace aker
     ANNSCache::stressTestInvalidateRandom(float percent) noexcept
     {
         std::lock_guard<SpinMutex> cache_guard(context_->cache_lock);
+        context_->has_activity = true;
+        context_->has_activity_since_last_export = true;
         maintenance_->stressTestInvalidateRandom(percent);
     }
 

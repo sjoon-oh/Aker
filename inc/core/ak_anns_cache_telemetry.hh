@@ -30,7 +30,7 @@ namespace aker
         std::string buildSummaryCsv() noexcept;
 
         /**
-         * @brief Exports all telemetry files under /tmp/aker_trace_<timestamp>/.
+         * @brief Exports all telemetry files under /tmp/aker_trace_<timestamp>_pid<PID>_gen<G>/.
          */
         void exportTraceToFiles() noexcept;
 

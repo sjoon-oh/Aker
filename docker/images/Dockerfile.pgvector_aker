@@ -35,14 +35,19 @@ RUN set -euo pipefail; \
         git checkout -f "${FAISS_REF}"; \
         git submodule update --init --recursive; \
     fi && \
-    cmake -S . -B build -G Ninja \
+    cmake -B build . \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX=/usr/local \
         -DFAISS_ENABLE_GPU=OFF \
         -DFAISS_ENABLE_PYTHON=OFF \
-        -DBUILD_TESTING=OFF && \
-    cmake --build build -j"$(nproc)" && \
-    cmake --install build && \
+        -DFAISS_ENABLE_CUVS=OFF \
+        -DBUILD_SHARED_LIBS=ON \
+        -DFAISS_ENABLE_C_API=ON \
+        -DFAISS_ENABLE_MKL=OFF && \
+    make -C build -j"$(nproc)" faiss && \
+    make -C build -j"$(nproc)" faiss_avx2 && \
+    make -C build -j"$(nproc)" faiss_avx512 && \
+    make -C build install && \
     ldconfig
 
 # Build and install Aker (TopKcache).

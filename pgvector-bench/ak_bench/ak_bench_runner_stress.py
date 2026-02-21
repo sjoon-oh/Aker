@@ -6,7 +6,7 @@ This runner is compatible with the legacy stress trace format:
 The stress workload is interpreted as:
 - Optional prefill phase: execute the search list once (legacy behavior)
 - Optional insert phase: insert vectors from trace['insert']
-- Invalidate phase: call topkache_invalidate_random(fraction)
+- Invalidate phase: call aker_invalidate_random(fraction)
 - Search phase: execute the search list again and record latency/recall
 
 Outputs are written in the same filenames as legacy scripts.
@@ -105,11 +105,10 @@ class StressWorkloadRunner:
             max_vector_id = self._runInsertPhase(cursor, insert_sql, insert_trace, max_vector_id)
 
         #
-        # Phase 3: Invalidate random cache entries (implemented inside pgvector/TopKache).
+        # Phase 3: Invalidate random cache entries (implemented inside pgvector/Aker).
         #
-        cursor.execute(f"SELECT topkache_invalidate_random({invalidate_fraction});")
-        logging.info(">> TopKache invalidation requested: %.2f%%", invalidate_fraction * 100.0
-        )
+        cursor.execute(f"SELECT aker_invalidate_random({invalidate_fraction});")
+        logging.info(">> Aker invalidation requested: %.2f%%", invalidate_fraction * 100.0)
 
         #
         # Phase 4: Timed search workload.

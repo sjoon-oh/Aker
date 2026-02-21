@@ -84,7 +84,7 @@ index 0000000..64eaff6
 +        return;
 +
 +    /* Export trace/telemetry first, then release resources. */
-+    akerExportTraceToFiles(ak_cache);
++    // akerExportTraceToFiles(ak_cache);
 +    akerDestroyAnnsCache(ak_cache);
 +    ak_cache = NULL;
 +}

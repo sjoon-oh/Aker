@@ -1,5 +1,7 @@
 #include "core/ak_anns_cache_stats.hh"
 
+#include <atomic>
+
 #include <algorithm>
 #include <cassert>
 #include <cerrno>
@@ -12,6 +14,8 @@
 #include <sstream>
 
 #include <sys/stat.h>
+
+#include <unistd.h>
 
 #include "ak_logger.hh"
 
@@ -211,14 +215,20 @@ namespace aker
     {
         /* Build a timestamped directory under /tmp.
          */
+        static std::atomic<std::uint64_t> export_generation{0};
+
         const auto now = std::chrono::system_clock::now();
         const std::time_t t = std::chrono::system_clock::to_time_t(now);
 
         std::tm tm;
         localtime_r(&t, &tm);
 
+        const std::uint64_t generation = export_generation.fetch_add(1, std::memory_order_relaxed);
+        const long pid = static_cast<long>(getpid());
+
         std::ostringstream oss;
         oss << k_trace_directory_prefix << std::put_time(&tm, "%Y-%m-%d_%H-%M-%S");
+        oss << "_pid" << pid << "_gen" << generation;
         oss << "/";
         return oss.str();
     }
