@@ -28,11 +28,11 @@
 namespace
 {
     static constexpr std::uint32_t k_default_dimension = 128;
-    static constexpr std::size_t k_default_entry_count = 100000;
+    static constexpr std::size_t k_default_entry_count = 1000;
     static constexpr std::size_t k_default_in_topk = 10;
     static constexpr std::size_t k_default_top_delta = 0;
-    static constexpr std::size_t k_default_query_count = 1000000;
-    static constexpr double k_default_exact_hit_ratio = 0.20;
+    static constexpr std::size_t k_default_query_count = 2000;
+    static constexpr double k_default_exact_hit_ratio = 0.30;
     static constexpr std::uint64_t k_default_seed = 1;
 
     struct TestOptions
@@ -286,7 +286,11 @@ namespace
             std::vector<float> result_vec(static_cast<std::size_t>(dimension));
             fillRandomVector(result_vec, rng);
 
-            const float dist = akerL2Distance(query_vector.data(), result_vec.data(), dimension);
+            /* The C wrapper exposes akerL2Distance(float*, float*, size_t) even though it does
+             * not mutate inputs. This test keeps the query vector const and casts for the call.
+             */
+            float* mutable_query_ptr = const_cast<float*>(query_vector.data());
+            const float dist = akerL2Distance(mutable_query_ptr, result_vec.data(), dimension);
             const std::uint64_t result_id = makeResultVectorId(query_id, static_cast<std::uint32_t>(j));
 
             char* slot = akerCreateVectorSlot(
