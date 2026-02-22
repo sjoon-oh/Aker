@@ -14,6 +14,9 @@ FROM ${BASE_IMAGE}
 
 ARG DEBIAN_FRONTEND=noninteractive
 
+# Use bash for RUN steps so 'set -euo pipefail' works reliably.
+SHELL ["/bin/bash", "-c"]
+
 # Build dependencies for Aker and FAISS.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \

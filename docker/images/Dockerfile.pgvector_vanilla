@@ -8,6 +8,9 @@
 ARG BASE_IMAGE=aker_pg16_base:16
 FROM ${BASE_IMAGE}
 
+# Use bash for RUN steps so 'set -euo pipefail' works reliably.
+SHELL ["/bin/bash", "-c"]
+
 ARG PGVECTOR_DIR=/opt/src/pgvector
 ARG PG_CONFIG=/usr/local/pgsql/bin/pg_config
 

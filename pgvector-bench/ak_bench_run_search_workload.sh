@@ -89,13 +89,12 @@ fi
 #
 run_bench_cli_numactl run-search-workload --config "${CONFIG_PATH}" --output-dir "${RUN_DIR}"
 
-# Wait before shutdown to allow Aker to export traces (default: 600s when AKER_CONFIG_PATH is set).
+maybe_stop_postgres "${CONFIG_PATH}"
+
+# Wait after postgres shutdown to allow Aker to export traces (default: 600s when AKER_CONFIG_PATH is set).
 maybe_wait_for_aker_trace_export
 
-#
 # Collect newly created /tmp trace directories.
-#
-maybe_stop_postgres "${CONFIG_PATH}"
 
 collect_new_tmp_traces "${TMP_BEFORE_LIST}" "${RUN_DIR}/tmp_traces" "${MERGED_TMP_DIR}"
 

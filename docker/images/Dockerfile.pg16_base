@@ -14,6 +14,9 @@ FROM ubuntu:24.04
 
 ARG DEBIAN_FRONTEND=noninteractive
 
+# Use bash for RUN steps so 'set -euo pipefail' works reliably.
+SHELL ["/bin/bash", "-c"]
+
 # NOTE: Keep dependencies explicit to make builds reproducible.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
@@ -23,6 +26,7 @@ RUN apt-get update && \
         bison \
         flex \
         git \
+        patch \
         pkg-config \
         wget \
         xz-utils \

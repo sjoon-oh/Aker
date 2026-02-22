@@ -508,14 +508,39 @@ pgctl_stop() {
     fi
 
     if [[ -n "${AK_BENCH_DOCKER_CONTAINER_INTERNAL}" ]]; then
-        docker_exec_raw "pg_ctl -D '${datastore_path}' -m fast stop >/dev/null 2>&1 || true"
-        return 0
+        local stop_output=""
+        if stop_output="$(docker_exec_raw "pg_ctl -D '${datastore_path}' -m fast stop 2>&1")"; then
+            return 0
+        fi
+
+        if [[ "${stop_output}" == *"no server running"* ]]; then
+            log_warn "pg_ctl reports no server running; treat stop as success: ${datastore_path}"
+            return 0
+        fi
+
+        log_err "pg_ctl stop failed (docker mode) for PGDATA=${datastore_path}: ${stop_output}"
+        log_err "Aborting benchmark due to unsafe PGDATA operations"
+
+        maybe_shutdown_docker_container ""
+        exit 1
     fi
 
     require_cmd pg_ctl
 
     # Stop only the instance using this data directory.
-    pg_ctl -D "${datastore_path}" -m fast stop >/dev/null 2>&1 || true
+    local stop_output=""
+    if stop_output="$(pg_ctl -D "${datastore_path}" -m fast stop 2>&1)"; then
+        return 0
+    fi
+
+    if [[ "${stop_output}" == *"no server running"* ]]; then
+        log_warn "pg_ctl reports no server running; treat stop as success: ${datastore_path}"
+        return 0
+    fi
+
+    log_err "pg_ctl stop failed for PGDATA=${datastore_path}: ${stop_output}"
+    log_err "Aborting benchmark due to unsafe PGDATA operations"
+    exit 1
 }
 
 pgctl_start() {

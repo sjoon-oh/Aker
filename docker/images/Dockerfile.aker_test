@@ -10,6 +10,9 @@ FROM ubuntu:24.04
 
 ARG DEBIAN_FRONTEND=noninteractive
 
+# Use bash for RUN steps so 'set -euo pipefail' works reliably.
+SHELL ["/bin/bash", "-c"]
+
 # Build dependencies for Aker and FAISS.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
@@ -20,6 +23,7 @@ RUN apt-get update && \
         ninja-build \
         pkg-config \
         git \
+        patch \
         python3 \
         libboost-all-dev \
         libopenblas-dev \

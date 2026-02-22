@@ -98,9 +98,9 @@ run_bench_cli_numactl run-stress-workload \
     --output-dir "${RUN_DIR}" \
     --invalidate "${INVALIDATE_FRACTION}"
 
-maybe_wait_for_aker_trace_export
-
 maybe_stop_postgres "${CONFIG_PATH}"
+
+maybe_wait_for_aker_trace_export
 
 collect_new_tmp_traces "${TMP_BEFORE_LIST}" "${RUN_DIR}/tmp_traces" "${MERGED_TMP_DIR}"
 
