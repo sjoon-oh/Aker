@@ -51,21 +51,16 @@ RUN set -euo pipefail; \
     make -C build install && \
     ldconfig
 
-# Copy the Aker source tree.
+# Clone the Aker source tree (includes required extern/* submodules).
 ARG AKER_SRC_DIR=/opt/src/aker
-COPY CMakeLists.txt ${AKER_SRC_DIR}/
-COPY inc ${AKER_SRC_DIR}/inc
-COPY src ${AKER_SRC_DIR}/src
-COPY test ${AKER_SRC_DIR}/test
-COPY bootstrap ${AKER_SRC_DIR}/bootstrap
-COPY extern ${AKER_SRC_DIR}/extern
+ARG AKER_REPO_URL=https://github.com/sjoon-oh/Aker.git
+ARG AKER_REF=release
 
-# Ensure xxHash headers exist (the snapshot zip may omit submodule contents).
 RUN set -euo pipefail; \
-    if [ ! -f "${AKER_SRC_DIR}/extern/xxHash/xxh3.h" ]; then \
-        rm -rf "${AKER_SRC_DIR}/extern/xxHash"; \
-        git clone --depth 1 https://github.com/Cyan4973/xxHash.git "${AKER_SRC_DIR}/extern/xxHash"; \
-    fi
+    git clone "${AKER_REPO_URL}" "${AKER_SRC_DIR}" && \
+    cd "${AKER_SRC_DIR}" && \
+    git checkout -f "${AKER_REF}" && \
+    git submodule update --init --recursive
 
 # Build and install Aker + test binary.
 ARG AKER_MODE=standard

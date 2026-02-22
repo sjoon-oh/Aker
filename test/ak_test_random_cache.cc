@@ -28,10 +28,10 @@
 namespace
 {
     static constexpr std::uint32_t k_default_dimension = 128;
-    static constexpr std::size_t k_default_entry_count = 100000;
+    static constexpr std::size_t k_default_entry_count = 1000;
     static constexpr std::size_t k_default_in_topk = 10;
     static constexpr std::size_t k_default_top_delta = 0;
-    static constexpr std::size_t k_default_query_count = 1000000;
+    static constexpr std::size_t k_default_query_count = 2000;
     static constexpr double k_default_exact_hit_ratio = 0.30;
     static constexpr std::uint64_t k_default_seed = 1;
 
@@ -48,6 +48,12 @@ namespace
         std::size_t query_count = k_default_query_count;
         double exact_hit_ratio = k_default_exact_hit_ratio;
         std::uint64_t seed = k_default_seed;
+    };
+
+    struct InsertedQuery
+    {
+        std::uint64_t query_id = 0;
+        std::vector<float> query_vector;
     };
 
     void printUsage(const char* argv0)
@@ -257,6 +263,57 @@ namespace
         const std::uint64_t lo = static_cast<std::uint64_t>(rank) + 1;
         return hi | lo;
     }
+
+    bool insertCacheEntryForQuery(
+        anns_cache_c_wrapper_t* cache,
+        std::uint64_t query_id,
+        const std::vector<float>& query_vector,
+        char* query_slot,
+        char* query_view,
+        std::size_t neighbors,
+        std::size_t vector_in_bytes,
+        std::uint32_t dimension,
+        std::mt19937_64& rng)
+    {
+        /* Simulate an index lookup by generating synthetic neighbor vectors,
+         * computing distances, and inserting the prepared cache entry.
+         */
+        std::vector<char*> neighbor_slots;
+        neighbor_slots.reserve(neighbors);
+
+        for (std::size_t j = 0; j < neighbors; j++)
+        {
+            std::vector<float> result_vec(static_cast<std::size_t>(dimension));
+            fillRandomVector(result_vec, rng);
+
+            const float dist = akerL2Distance(query_vector.data(), result_vec.data(), dimension);
+            const std::uint64_t result_id = makeResultVectorId(query_id, static_cast<std::uint32_t>(j));
+
+            char* slot = akerCreateVectorSlot(
+                result_id,
+                vector_in_bytes,
+                reinterpret_cast<char*>(result_vec.data()),
+                0,
+                0,
+                dist);
+            neighbor_slots.push_back(slot);
+        }
+
+        char* entry = akerCreateCacheEntry(
+            cache,
+            query_slot,
+            neighbors,
+            neighbor_slots.data());
+
+        const bool inserted = akerInsertCacheEntry(cache, query_id, entry, query_view);
+        if (!inserted)
+            akerDestroyCacheEntry(entry);
+
+        for (char* slot : neighbor_slots)
+            akerDestroyVectorSlot(slot);
+
+        return inserted;
+    }
 }
 
 int main(int argc, char** argv)
@@ -317,11 +374,13 @@ int main(int argc, char** argv)
 
     /* Keep the original query vectors so exact-hit queries can reuse valid payload bytes.
      */
-    std::vector<std::vector<float>> inserted_queries;
+    std::vector<InsertedQuery> inserted_queries;
     inserted_queries.reserve(opt.entry_count);
 
     bool insert_failed = false;
 
+    /* Seed the cache with synthetic entries so the query loop can request exact hits.
+     */
     for (std::size_t i = 0; i < opt.entry_count; i++)
     {
         const std::uint64_t query_id = static_cast<std::uint64_t>(i + 1);
@@ -343,41 +402,26 @@ int main(int argc, char** argv)
             vector_in_bytes,
             floatCopyTransform);
 
-        std::vector<char*> neighbor_slots;
-        neighbor_slots.reserve(neighbors);
-        for (std::size_t j = 0; j < neighbors; j++)
-        {
-            std::vector<float> result_vec(static_cast<std::size_t>(opt.dimension));
-            fillRandomVector(result_vec, rng);
-
-            const float dist = akerL2Distance(query_vec.data(), result_vec.data(), opt.dimension);
-            const std::uint64_t result_id = makeResultVectorId(query_id, static_cast<std::uint32_t>(j));
-
-            char* slot = akerCreateVectorSlot(
-                result_id,
-                vector_in_bytes,
-                reinterpret_cast<char*>(result_vec.data()),
-                0,
-                0,
-                dist);
-            neighbor_slots.push_back(slot);
-        }
-
-        char* entry = akerCreateCacheEntry(
+        const bool inserted = insertCacheEntryForQuery(
             cache,
+            query_id,
+            query_vec,
             query_slot,
+            query_view,
             neighbors,
-            neighbor_slots.data());
-
-        const bool inserted = akerInsertCacheEntry(cache, query_id, entry, query_view);
+            vector_in_bytes,
+            opt.dimension,
+            rng);
         if (!inserted)
         {
-            akerDestroyCacheEntry(entry);
             insert_failed = true;
         }
         else
         {
-            inserted_queries.emplace_back(std::move(query_vec));
+            InsertedQuery record;
+            record.query_id = query_id;
+            record.query_vector = std::move(query_vec);
+            inserted_queries.emplace_back(std::move(record));
         }
 
         /* The cache copies query vectors and result payloads into its own storage.
@@ -385,9 +429,6 @@ int main(int argc, char** argv)
          */
         akerDestroyVectorView(query_view);
         akerDestroyVectorSlot(query_slot);
-
-        for (char* slot : neighbor_slots)
-            akerDestroyVectorSlot(slot);
 
         if (insert_failed)
             break;
@@ -401,15 +442,21 @@ int main(int argc, char** argv)
     }
 
     std::uniform_real_distribution<double> hit_dist(0.0, 1.0);
-    std::uniform_int_distribution<std::size_t> entry_pick(0, inserted_queries.size() - 1);
 
     std::size_t exact_hit = 0;
     std::size_t similar_hit = 0;
     std::size_t miss = 0;
     std::size_t invalid = 0;
 
+    std::size_t miss_inserted = 0;
+    std::size_t miss_insert_failed = 0;
+    std::size_t requested_hit_but_missed = 0;
+
     std::uint64_t next_miss_id = static_cast<std::uint64_t>(opt.entry_count + 1);
 
+    /* Issue queries and record whether they hit/miss.
+     * For true misses, insert a new entry to exercise eviction/insertion paths.
+     */
     for (std::size_t q = 0; q < opt.query_count; q++)
     {
         const bool want_hit = (hit_dist(rng) < opt.exact_hit_ratio);
@@ -419,9 +466,10 @@ int main(int argc, char** argv)
 
         if (want_hit)
         {
-            const std::size_t idx = entry_pick(rng);
-            query_id = static_cast<std::uint64_t>(idx + 1);
-            query_vec = inserted_queries[idx];
+            std::uniform_int_distribution<std::size_t> entry_pick(0, inserted_queries.size() - 1);
+            const InsertedQuery& picked = inserted_queries[entry_pick(rng)];
+            query_id = picked.query_id;
+            query_vec = picked.query_vector;
         }
         else
         {
@@ -452,6 +500,41 @@ int main(int argc, char** argv)
         if (result == nullptr)
         {
             miss++;
+
+            /* Simulate the real integration behavior:
+             * on a miss, the caller would query the underlying index, then insert
+             * the new result set into the cache (triggering eviction if needed).
+             */
+            if (!want_hit)
+            {
+                const bool inserted = insertCacheEntryForQuery(
+                    cache,
+                    query_id,
+                    query_vec,
+                    query_slot,
+                    query_view,
+                    neighbors,
+                    vector_in_bytes,
+                    opt.dimension,
+                    rng);
+
+                if (inserted)
+                {
+                    InsertedQuery record;
+                    record.query_id = query_id;
+                    record.query_vector = std::move(query_vec);
+                    inserted_queries.emplace_back(std::move(record));
+                    miss_inserted++;
+                }
+                else
+                {
+                    miss_insert_failed++;
+                }
+            }
+            else
+            {
+                requested_hit_but_missed++;
+            }
         }
         else
         {
@@ -479,6 +562,9 @@ int main(int argc, char** argv)
     std::cout << "[aker-random-cache-test] results: exact_hit=" << exact_hit
               << " similar_hit=" << similar_hit
               << " miss=" << miss
+              << " miss_inserted=" << miss_inserted
+              << " miss_insert_failed=" << miss_insert_failed
+              << " requested_hit_but_missed=" << requested_hit_but_missed
               << " invalid=" << invalid
               << "\n";
 

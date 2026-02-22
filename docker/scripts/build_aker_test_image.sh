@@ -11,6 +11,8 @@ DOCKERFILE_PATH="${PROJECT_ROOT}/docker/images/Dockerfile.aker_test"
 FAISS_REPO_URL="${FAISS_REPO_URL:-https://github.com/facebookresearch/faiss.git}"
 FAISS_REF="${FAISS_REF:-}"
 AKER_MODE="${AKER_MODE:-standard}"
+AKER_REPO_URL="${AKER_REPO_URL:-https://github.com/sjoon-oh/Aker.git}"
+AKER_REF="${AKER_REF:-release}"
 
 docker build \
     -f "${DOCKERFILE_PATH}" \
@@ -18,6 +20,8 @@ docker build \
     --build-arg "FAISS_REPO_URL=${FAISS_REPO_URL}" \
     --build-arg "FAISS_REF=${FAISS_REF}" \
     --build-arg "AKER_MODE=${AKER_MODE}" \
+    --build-arg "AKER_REPO_URL=${AKER_REPO_URL}" \
+    --build-arg "AKER_REF=${AKER_REF}" \
     "${PROJECT_ROOT}"
 
 echo "Built image: ${IMAGE_TAG}"
