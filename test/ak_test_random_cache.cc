@@ -31,7 +31,7 @@ namespace
     static constexpr std::size_t k_default_entry_count = 1000;
     static constexpr std::size_t k_default_in_topk = 10;
     static constexpr std::size_t k_default_top_delta = 0;
-    static constexpr std::size_t k_default_query_count = 2000;
+    static constexpr std::size_t k_default_query_count = 1000000;
     static constexpr double k_default_exact_hit_ratio = 0.30;
     static constexpr std::uint64_t k_default_seed = 1;
 
@@ -63,11 +63,11 @@ namespace
             << "Options:\n"
             << "  --config <path>         Bootstrap config path (default: $AKER_CONFIG_PATH or bootstrap/aker-standard.ini)\n"
             << "  --dimension <u32>       Vector dimension (default: 128)\n"
-            << "  --entries <n>           Number of cache entries to insert (default: 1000)\n"
+            << "  --entries <n>           Number of cache entries to insert\n"
             << "  --in-topk <n>           In-topK size (default: 10)\n"
             << "  --top-delta <n>         Top-delta size (default: 0)\n"
             << "  --pool-size <n>         Vector pool capacity (default: entries * (in_topk + top_delta))\n"
-            << "  --queries <n>           Number of queries to run (default: 2000)\n"
+            << "  --queries <n>           Number of queries to run\n"
             << "  --exact-hit-ratio <f>   Fraction of queries that are exact hits in [0,1] (default: 0.30)\n"
             << "  --seed <u64>            RNG seed (default: 1)\n";
     }
