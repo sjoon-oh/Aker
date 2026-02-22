@@ -181,3 +181,37 @@ target_link_libraries(app-sequence PRIVATE aker)
 # does not resolve executable symbols through DT_NEEDED dependencies of a shared
 # library by default, so we must link this component explicitly.
 target_link_libraries(app-sequence PRIVATE Boost::program_options)
+
+# -----------------------------
+# aker-random-cache-test (lightweight cache smoke test)
+# -----------------------------
+add_executable(aker-random-cache-test
+    "${PROJECT_SOURCE_DIR}/test/ak_test_random_cache.cc"
+)
+
+target_include_directories(aker-random-cache-test
+    PRIVATE
+        "${PROJECT_SOURCE_DIR}/inc"
+        "${PROJECT_SOURCE_DIR}/extern"
+)
+
+target_link_libraries(aker-random-cache-test PRIVATE aker)
+
+# -----------------------------
+# Install rules
+# -----------------------------
+include(GNUInstallDirs)
+
+install(TARGETS aker
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
+
+install(DIRECTORY "${PROJECT_SOURCE_DIR}/inc/"
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+)
+
+install(TARGETS aker-random-cache-test
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
