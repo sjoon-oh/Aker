@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cstdint>
 #include <fstream>
 #include <iomanip>
 #include <sstream>
@@ -10,6 +11,86 @@ namespace aker
 {
     namespace
     {
+        /**
+         * @brief Lightweight memory estimate used for telemetry export.
+         *
+         * This intentionally reports an approximation (not exact RSS) because FAISS and
+         * allocator-level behaviors are not exposed in a portable way.
+         *
+         * The estimate follows the methodology used in the Aker paper evaluation and the
+         * accompanying spreadsheet: only the core components are counted.
+         *
+         * Components counted:
+         * - Cache entry metadata (per entry)
+         * - Vector pool payload (per pooled vector)
+         * - Query filter (HNSW) payload approximation (per representative entry)
+         */
+        struct MemoryEstimate
+        {
+            std::uint64_t entry_bytes{0};
+            std::uint64_t pool_bytes{0};
+            std::uint64_t filter_bytes{0};
+            std::uint64_t total_bytes{0};
+        };
+
+        /**
+         * @brief Returns bytes->MB conversion using decimal MB (1,000,000 bytes).
+         */
+        double bytesToMb(std::uint64_t bytes) noexcept
+        {
+            static constexpr double k_mb_divisor = 1000.0 * 1000.0;
+            return static_cast<double>(bytes) / k_mb_divisor;
+        }
+
+        /**
+         * @brief Estimates the memory footprint of core Aker data structures.
+         */
+        MemoryEstimate estimateCoreMemory(
+            size_t total_entry_count,
+            size_t physical_entry_count,
+            size_t vector_pool_size,
+            std::uint32_t dimension) noexcept
+        {
+            /*
+            * NOTE: These constants are intentionally fixed (not derived from sizeof()) to keep
+            * results comparable across platforms and match the paper/spreadsheet methodology.
+            */
+            static constexpr std::uint64_t k_entry_size_bytes = 80;
+            static constexpr std::uint64_t k_float_bytes = 4;
+            static constexpr std::uint64_t k_pool_meta_bytes = 48;
+
+            /*
+            * Query filter estimation (paper-style):
+            *   Per-entry bytes = (d * 4) + (m * 8)
+            *     - d * 4 : float32 query vector payload
+            *     - m * 8 : neighbor identifier list (8-byte identifiers)
+            *   Total filter bytes = R * per-entry bytes
+            */
+            static constexpr std::uint64_t k_neighbor_id_bytes = 8;
+            static constexpr std::uint64_t k_query_filter_m = 4;
+
+            const std::uint64_t dim_u64 = static_cast<std::uint64_t>(dimension);
+
+            MemoryEstimate estimate;
+
+            estimate.entry_bytes =
+                static_cast<std::uint64_t>(total_entry_count) * k_entry_size_bytes;
+
+            estimate.pool_bytes =
+                static_cast<std::uint64_t>(vector_pool_size) *
+                (k_pool_meta_bytes + (k_float_bytes * dim_u64));
+
+            estimate.filter_bytes =
+                static_cast<std::uint64_t>(physical_entry_count) *
+                ((k_float_bytes * dim_u64) +
+                (k_query_filter_m * k_neighbor_id_bytes));
+
+            estimate.total_bytes =
+                estimate.entry_bytes + estimate.pool_bytes + estimate.filter_bytes;
+
+            return estimate;
+        }
+
         /**
          * @brief Cache summary file name.
          */
@@ -107,6 +188,23 @@ namespace aker
         oss << "  Approx repr vectors: " << context_->apprx_filter->getRepresentativeVectorNumber() << "\n";
         oss << "  Approx added vectors: " << context_->apprx_filter->getAddedCounts() << "\n";
 
+        /*
+         * Export an approximate memory footprint of core Aker structures.
+         * See buildSummaryCsv() for the same values in machine-readable form.
+         */
+        const MemoryEstimate mem = estimateCoreMemory(
+            total_entry_count,
+            physical_entry_count,
+            context_->vector_pool->getSize(),
+            context_->parameter.vector_format.dimension);
+
+        oss << "\n";
+        oss << "  Memory estimate (core-only, decimal MB)\n";
+        oss << "    Entries: " << std::fixed << std::setprecision(3) << bytesToMb(mem.entry_bytes) << " MB\n";
+        oss << "    Pool: " << std::fixed << std::setprecision(3) << bytesToMb(mem.pool_bytes) << " MB\n";
+        oss << "    Query filter: " << std::fixed << std::setprecision(3) << bytesToMb(mem.filter_bytes) << " MB\n";
+        oss << "    Total: " << std::fixed << std::setprecision(3) << bytesToMb(mem.total_bytes) << " MB\n";
+
         return oss.str();
     }
 
@@ -198,6 +296,31 @@ namespace aker
         oss << "ApproxReprCount," << context_->apprx_filter->getRepresentativeVectorNumber() << "\n";
         oss << "ApproxAddedCount," << context_->apprx_filter->getAddedCounts() << "\n";
 
+        /*
+         * Memory estimation.
+         *
+         * This is an approximation intended for comparison across configurations.
+         * It counts only core structures and excludes container overheads (unordered_map
+         * buckets, allocator fragmentation, std::vector capacities, etc.).
+         */
+        const MemoryEstimate mem = estimateCoreMemory(
+            total_entry_count,
+            physical_entry_count,
+            context_->vector_pool->getSize(),
+            context_->parameter.vector_format.dimension);
+
+        oss << "EstimatedEntryBytes," << mem.entry_bytes << "\n";
+        oss << "EstimatedPoolBytes," << mem.pool_bytes << "\n";
+        oss << "EstimatedQueryFilterBytes," << mem.filter_bytes << "\n";
+        oss << "EstimatedTotalBytes," << mem.total_bytes << "\n";
+
+        oss << "EstimatedEntryMB," << bytesToMb(mem.entry_bytes) << "\n";
+        oss << "EstimatedPoolMB," << bytesToMb(mem.pool_bytes) << "\n";
+        oss << "EstimatedQueryFilterMB," << bytesToMb(mem.filter_bytes) << "\n";
+        oss << "EstimatedTotalMB," << bytesToMb(mem.total_bytes) << "\n";
+
+        oss << "EstimatedMemoryScope,entry_pool_query_filter_only\n";
+
         return oss.str();
     }
 
@@ -205,7 +328,7 @@ namespace aker
     {
         /* Export all telemetry under a single /tmp timestamped directory.
          */
-        if (!context_->has_activity_since_last_export)
+        if (!context_->has_activity)
         {
             return;
         }
@@ -272,8 +395,5 @@ namespace aker
                 file.close();
             }
         }
-
-        /* Mark the current telemetry snapshot as exported. */
-        context_->has_activity_since_last_export = false;
     }
 }
