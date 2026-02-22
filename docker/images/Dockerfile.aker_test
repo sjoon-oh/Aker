@@ -27,6 +27,7 @@ RUN apt-get update && \
         python3 \
         libboost-all-dev \
         libopenblas-dev \
+        libgflags-dev \
         gfortran \
     && rm -rf /var/lib/apt/lists/*
 
