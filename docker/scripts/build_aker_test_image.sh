@@ -5,6 +5,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
+# Persist all build output to a host-side log file for post-mortem debugging.
+LOG_DIR="${PROJECT_ROOT}/temp"
+mkdir -p "${LOG_DIR}"
+LOG_TIMESTAMP="$(date +"%Y%m%d_%H%M%S")"
+LOG_FILE="${LOG_DIR}/docker_build_aker_test_${LOG_TIMESTAMP}.log"
+exec > >(tee -a "${LOG_FILE}") 2>&1
+
 IMAGE_TAG="${AKER_TEST_IMAGE_TAG:-aker_test:latest}"
 DOCKERFILE_PATH="${PROJECT_ROOT}/docker/images/Dockerfile.aker_test"
 
@@ -24,5 +31,6 @@ docker build \
     --build-arg "AKER_REF=${AKER_REF}" \
     "${PROJECT_ROOT}"
 
+echo "Logging to: ${LOG_FILE}"
 echo "Built image: ${IMAGE_TAG}"
 echo "Run: docker run --rm ${IMAGE_TAG} --help"
