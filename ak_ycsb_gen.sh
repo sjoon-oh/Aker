@@ -19,7 +19,7 @@ BIN_PATH="${AK_YCSB_GEN_BIN_PATH:-${BIN_PATH_DEFAULT}}"
 if [[ ! -x "${BIN_PATH}" ]]; then
     printf "[ak_ycsb_gen] ERROR: generator binary not found or not executable: %s\n" "${BIN_PATH}" >&2
     printf "[ak_ycsb_gen] HINT: build first (from repo root):\n" >&2
-    printf "[ak_ycsb_gen]   cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBOOST_ROOT=/opt/boost_1_86 -DFAISS_ROOT=/usr/local\n" >&2
+    printf "[ak_ycsb_gen]   cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DFAISS_ROOT=/usr/local\n" >&2
     printf "[ak_ycsb_gen]   cmake --build build -j\n" >&2
     exit 1
 fi
