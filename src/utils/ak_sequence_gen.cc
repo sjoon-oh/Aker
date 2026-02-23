@@ -4,6 +4,7 @@
  */
 
 #include <cstdint>
+#include <algorithm>
 #include <unordered_map>
 
 #include <fstream>
@@ -18,7 +19,7 @@ YcsbSeqGenerator::YcsbSeqGenerator() noexcept
 std::uint64_t 
 YcsbSeqGenerator::generateNextKey() noexcept
 {
-    std::uint64_t keyNumber = keyGenerator->Next();
+    std::uint64_t keyNumber = key_generator_->Next();
     return keyNumber;
 }
 
@@ -26,13 +27,13 @@ std::uint64_t
 YcsbSeqGenerator::chooseNextKey() noexcept
 {
     std::uint64_t keyNumber = 0;
-    if (keyChooser.get() != nullptr)
+    if (key_chooser_.get() != nullptr)
     {   
         do
         {
-            keyNumber = keyChooser->Next();
+            keyNumber = key_chooser_->Next();
         } 
-        while (keyNumber > insertKeySequence->Last());
+        while (keyNumber > insert_key_sequence_->Last());
     }
     return keyNumber;
 }
@@ -41,9 +42,9 @@ ycsbc::Operation
 YcsbSeqGenerator::chooseNextOp() noexcept
 {
     ycsbc::Operation op = ycsbc::Operation::INSERT;
-    if (opChooser.get() != nullptr)
+    if (op_chooser_.get() != nullptr)
     {
-        op = opChooser->Next();
+        op = op_chooser_->Next();
     }
 
     return op;
@@ -58,34 +59,34 @@ YcsbSeqGenerator::setGenerator(
     double readRatio
 ) noexcept
 {
-    insertKeySequence->Set(recordCount);
+    insert_key_sequence_->Set(recordCount);
 
     // Make the distType lowercase.
     for (char &c : distType) c = c | ' ';
 
     if (distType == "uniform")
-        keyChooser.reset(new ycsbc::UniformGenerator(0, recordCount - 1));
+        key_chooser_.reset(new ycsbc::UniformGenerator(0, recordCount - 1));
 
     else if (distType == "zipfian")
-        keyChooser.reset(new ycsbc::ScrambledZipfianGenerator(recordCount));
+        key_chooser_.reset(new ycsbc::ScrambledZipfianGenerator(recordCount));
 
     else if (distType == "latest")
-        keyChooser.reset(new ycsbc::SkewedLatestGenerator(*insertKeySequence));
+        key_chooser_.reset(new ycsbc::SkewedLatestGenerator(*insert_key_sequence_));
 
     else
     {
-        keyChooser.reset();
+        key_chooser_.reset();
         return false;
     }
 
     if (insertRatio > 0)
-        opChooser->AddValue(ycsbc::Operation::INSERT, insertRatio);
+        op_chooser_->AddValue(ycsbc::Operation::INSERT, insertRatio);
 
     if (updateRatio > 0)
-        opChooser->AddValue(ycsbc::Operation::UPDATE, updateRatio);
+        op_chooser_->AddValue(ycsbc::Operation::UPDATE, updateRatio);
 
     if (readRatio > 0)
-        opChooser->AddValue(ycsbc::Operation::READ, readRatio);
+        op_chooser_->AddValue(ycsbc::Operation::READ, readRatio);
 
     return true;
 }
@@ -96,31 +97,31 @@ YcsbSeqGenerator::setGenerator(
 void 
 YcsbSeqGenerator::resetGenerator() noexcept
 {
-    keySequence.clear();
-    opSequence.clear();
+    key_sequence_.clear();
+    op_sequence_.clear();
 
     // Make default
-    insertKeySequence.reset(new ycsbc::CounterGenerator(3));
-    keyGenerator.reset(new ycsbc::CounterGenerator(0));
+    insert_key_sequence_.reset(new ycsbc::CounterGenerator(3));
+    key_generator_.reset(new ycsbc::CounterGenerator(0));
 
-    opChooser.reset(
+    op_chooser_.reset(
         new ycsbc::DiscreteGenerator<ycsbc::Operation>()
     );
 
-    keyChooser.reset();
+    key_chooser_.reset();
 }
 
 std::vector<std::uint64_t>&
 YcsbSeqGenerator::generateKeySequence(size_t queryVectorNumber) noexcept
 {
     for (size_t count = 0; count < queryVectorNumber; count++)
-        keySequence.emplace_back(chooseNextKey());
+        key_sequence_.emplace_back(chooseNextKey());
 
     // This class just generates the sequence with the given distribution set.
     // Mapping of external vectors should be done by the caller.
     // Use retuned sequence ID to map the vectors.
 
-    return keySequence;
+    return key_sequence_;
 }
 
 size_t
@@ -130,7 +131,7 @@ YcsbSeqGenerator::checkUniqueIds(
 {
     // Extract unique keys
     std::unordered_map<std::uint64_t, size_t> uniqueKeys;
-    for (std::uint64_t& key: keySequence)
+    for (std::uint64_t& key: key_sequence_)
     {
         if (uniqueKeys.find(key) == uniqueKeys.end())
             uniqueKeys[key] = 1;
@@ -161,12 +162,19 @@ void
 YcsbSeqGenerator::exportFrequency() noexcept
 {
 
+    exportFrequency("sequence-freqs.csv");
+}
+
+void
+YcsbSeqGenerator::exportFrequency(const std::string& output_path) noexcept
+{
+
     std::vector<std::pair<std::uint64_t, size_t>> uniqueKeys;
     checkUniqueIds(uniqueKeys);
 
     // 
     // Export to files to visualize in descending count order.
-    std::fstream outputFile("sequence-freqs.csv", std::ios::out);
+    std::fstream outputFile(output_path, std::ios::out);
     if (!outputFile)
         return;
 
@@ -179,11 +187,18 @@ YcsbSeqGenerator::exportFrequency() noexcept
 void
 YcsbSeqGenerator::exportSequence() noexcept
 {
-    std::fstream outputFile("sequence.csv", std::ios::out);
+
+    exportSequence("sequence.csv");
+}
+
+void
+YcsbSeqGenerator::exportSequence(const std::string& output_path) noexcept
+{
+    std::fstream outputFile(output_path, std::ios::out);
     if (!outputFile)
         return;
 
-    for (const auto& key: keySequence)
+    for (const auto& key: key_sequence_)
         outputFile << key << "\t" << chooseNextOp() << std::endl;
 
     outputFile.close();

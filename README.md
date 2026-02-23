@@ -172,7 +172,7 @@ This repository includes `extern/` in the compiler include path.
 
 - **xxHash (XXH3)**: required for `akerDefaultHash()`.
   - Expected include: `xxHash/xxh3.h`
-- **YCSB-C headers**: used by the `app-sequence` utility.
+- **YCSB-C headers**: used by the `ak_ycsb_gen` utility.
   - Expected include prefix: `YCSB-C/core/...`
 
 ---
@@ -193,7 +193,12 @@ cmake --build build -j
 Artifacts:
 
 - `build/lib/libaker.so`
-- `build/bin/app-sequence` (utility target)
+- `build/bin/ak_ycsb_gen` (utility target)
+
+`ak_ycsb_gen` writes the Zipfian key sequence output files under:
+
+- `apps/ak_ycsb_gen/sequence.csv`
+- `apps/ak_ycsb_gen/sequence-freqs.csv`
 
 ### Build with a specific mode
 

@@ -162,25 +162,25 @@ target_link_libraries(aker
 )
 
 # -----------------------------
-# app-sequence (kept for sequence generator usage)
+# ak_ycsb_gen (simZipf Zipfian key sequence generator)
 # -----------------------------
-add_executable(app-sequence
-    "${PROJECT_SOURCE_DIR}/test/app-sequence.cc"
+add_executable(ak_ycsb_gen
+    "${PROJECT_SOURCE_DIR}/apps/ak_ycsb_gen.cc"
 )
 
-target_include_directories(app-sequence
+target_include_directories(ak_ycsb_gen
     PRIVATE
         "${PROJECT_SOURCE_DIR}/inc"
         "${PROJECT_SOURCE_DIR}/extern"
 )
 
 # Link only to libaker.so. Runtime discovery of libaker.so is via loader search paths.
-target_link_libraries(app-sequence PRIVATE aker)
+target_link_libraries(ak_ycsb_gen PRIVATE aker)
 
-# app-sequence directly uses Boost.Program_options (CLI parsing). The GNU linker
+# ak_ycsb_gen directly uses Boost.Program_options (CLI parsing). The GNU linker
 # does not resolve executable symbols through DT_NEEDED dependencies of a shared
 # library by default, so we must link this component explicitly.
-target_link_libraries(app-sequence PRIVATE Boost::program_options)
+target_link_libraries(ak_ycsb_gen PRIVATE Boost::program_options)
 
 # -----------------------------
 # aker-random-cache-test (lightweight cache smoke test)

@@ -25,15 +25,15 @@
 class YcsbSeqGenerator
 {
 private:
-    std::vector<std::uint64_t>                              keySequence;
-    std::vector<ycsbc::Operation>                           opSequence;
+    std::vector<std::uint64_t>                              key_sequence_;
+    std::vector<ycsbc::Operation>                           op_sequence_;
 
-    std::unique_ptr<ycsbc::CounterGenerator>                insertKeySequence;
+    std::unique_ptr<ycsbc::CounterGenerator>                insert_key_sequence_;
 
-    std::unique_ptr<ycsbc::CounterGenerator>                keyGenerator;
-    std::unique_ptr<ycsbc::Generator<std::uint64_t>>        keyChooser;
+    std::unique_ptr<ycsbc::CounterGenerator>                key_generator_;
+    std::unique_ptr<ycsbc::Generator<std::uint64_t>>        key_chooser_;
 
-    std::unique_ptr<ycsbc::DiscreteGenerator<ycsbc::Operation>>    opChooser;
+    std::unique_ptr<ycsbc::DiscreteGenerator<ycsbc::Operation>>    op_chooser_;
 
     // 
     // Generated sequence
@@ -58,7 +58,9 @@ public:
     virtual size_t checkUniqueIds(std::vector<std::pair<std::uint64_t, size_t>>& idsByFreq) noexcept;
 
     virtual void exportFrequency() noexcept;
+    virtual void exportFrequency(const std::string& output_path) noexcept;
     virtual void exportSequence() noexcept;
+    virtual void exportSequence(const std::string& output_path) noexcept;
 };
 
 #endif
