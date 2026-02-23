@@ -43,7 +43,7 @@ find_package(Threads REQUIRED)
 # -----------------------------
 # Boost (shared-only)
 # -----------------------------
-set(BOOST_ROOT "/opt/boost_1_86" CACHE PATH "Boost root directory")
+set(BOOST_ROOT "" CACHE PATH "Boost root directory (optional)")
 set(Boost_USE_STATIC_LIBS OFF)
 set(Boost_USE_MULTITHREADED ON)
 set(Boost_USE_STATIC_RUNTIME OFF)
