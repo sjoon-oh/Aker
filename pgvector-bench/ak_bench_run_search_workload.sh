@@ -60,10 +60,61 @@ RUN_DIR="${OUTPUT_ROOT}/runs/search_${RUN_ID}"
 MERGED_TMP_DIR="${OUTPUT_ROOT}/merged_tmp_traces"
 mkdir -p "${RUN_DIR}" "${MERGED_TMP_DIR}"
 
+TMP_BEFORE_LIST="${RUN_DIR}/tmp_trace_before.txt"
+CLEANUP_DONE=0
+
+cleanup() {
+    local exit_code=$?
+
+    if [[ "${CLEANUP_DONE}" == "1" ]]; then
+        exit "${exit_code}"
+    fi
+    CLEANUP_DONE=1
+
+    set +e
+
+    # If the container dies or the client fails, docker logs can help diagnose the failure.
+    if [[ "${exit_code}" != "0" && -n "${AK_BENCH_DOCKER_CONTAINER_INTERNAL:-}" ]]; then
+        if command -v docker >/dev/null 2>&1; then
+            docker logs "${AK_BENCH_DOCKER_CONTAINER_INTERNAL}" > "${RUN_DIR}/docker_container.log" 2>&1 || true
+        fi
+    fi
+
+    # Ensure PostgreSQL is stopped so log files are flushed.
+    maybe_stop_postgres_best_effort "${CONFIG_PATH}" || true
+
+    # Avoid long waits on error by default.
+    if [[ "${exit_code}" == "0" ]]; then
+        maybe_wait_for_aker_trace_export
+    else
+        local wait_sec="${AK_BENCH_TRACE_EXPORT_WAIT_ON_ERROR_SEC:-0}"
+        if [[ -n "${wait_sec}" && "${wait_sec}" != "0" ]]; then
+            log_info "Waiting ${wait_sec} seconds for trace export after error"
+            sleep "${wait_sec}"
+        fi
+    fi
+
+    if [[ -f "${TMP_BEFORE_LIST}" ]]; then
+        collect_new_tmp_traces "${TMP_BEFORE_LIST}" "${RUN_DIR}/tmp_traces" "${MERGED_TMP_DIR}" || true
+    fi
+
+    collect_postgres_logs "${CONFIG_PATH}" "${RUN_DIR}" || true
+
+    docker_cleanup_tmp_traces || true
+
+    maybe_shutdown_docker_container "${CONFIG_PATH}" || true
+
+    exit "${exit_code}"
+}
+
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 #
 # Capture /tmp trace candidates BEFORE recovery/start, so traces created during postgres startup are also collected.
 #
-TMP_BEFORE_LIST="${RUN_DIR}/tmp_trace_before.txt"
+
 capture_tmp_trace_list "${TMP_BEFORE_LIST}"
 
 #
@@ -88,20 +139,5 @@ fi
 # Run benchmark under fixed NUMA binding.
 #
 run_bench_cli_numactl run-search-workload --config "${CONFIG_PATH}" --output-dir "${RUN_DIR}"
-
-maybe_stop_postgres "${CONFIG_PATH}"
-
-# Wait after postgres shutdown to allow Aker to export traces (default: 600s when AKER_CONFIG_PATH is set).
-maybe_wait_for_aker_trace_export
-
-# Collect newly created /tmp trace directories.
-
-collect_new_tmp_traces "${TMP_BEFORE_LIST}" "${RUN_DIR}/tmp_traces" "${MERGED_TMP_DIR}"
-
-docker_cleanup_tmp_traces
-
-maybe_shutdown_docker_container "${CONFIG_PATH}"
-
-collect_postgres_logs "${CONFIG_PATH}" "${RUN_DIR}"
 
 printf "[OK] Search-workload finished: %s\n" "${RUN_DIR}"

@@ -65,6 +65,57 @@ RUN_DIR="${OUTPUT_ROOT}/runs/stress_${RUN_ID}"
 MERGED_TMP_DIR="${OUTPUT_ROOT}/merged_tmp_traces"
 mkdir -p "${RUN_DIR}" "${MERGED_TMP_DIR}"
 
+TMP_BEFORE_LIST="${RUN_DIR}/tmp_trace_before.txt"
+CLEANUP_DONE=0
+
+cleanup() {
+    local exit_code=$?
+
+    if [[ "${CLEANUP_DONE}" == "1" ]]; then
+        exit "${exit_code}"
+    fi
+    CLEANUP_DONE=1
+
+    set +e
+
+    if [[ "${exit_code}" != "0" && -n "${AK_BENCH_DOCKER_CONTAINER_INTERNAL:-}" ]]; then
+        if command -v docker >/dev/null 2>&1; then
+            docker logs "${AK_BENCH_DOCKER_CONTAINER_INTERNAL}" > "${RUN_DIR}/docker_container.log" 2>&1 || true
+        fi
+    fi
+
+    maybe_stop_postgres_best_effort "${CONFIG_PATH}" || true
+
+    if [[ "${exit_code}" == "0" ]]; then
+        maybe_wait_for_aker_trace_export
+    else
+        local wait_sec="${AK_BENCH_TRACE_EXPORT_WAIT_ON_ERROR_SEC:-0}"
+        if [[ -n "${wait_sec}" && "${wait_sec}" != "0" ]]; then
+            log_info "Waiting ${wait_sec} seconds for trace export after error"
+            sleep "${wait_sec}"
+        fi
+    fi
+
+    if [[ -f "${TMP_BEFORE_LIST}" ]]; then
+        collect_new_tmp_traces "${TMP_BEFORE_LIST}" "${RUN_DIR}/tmp_traces" "${MERGED_TMP_DIR}" || true
+    fi
+
+    collect_postgres_logs "${CONFIG_PATH}" "${RUN_DIR}" || true
+
+    docker_cleanup_tmp_traces || true
+
+    maybe_shutdown_docker_container "${CONFIG_PATH}" || true
+
+    exit "${exit_code}"
+}
+
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+# Capture /tmp trace candidates once for the entire stress pipeline.
+capture_tmp_trace_list "${TMP_BEFORE_LIST}"
+
 #
 # Phase A: Generate stress workload (may INSERT into DB as part of legacy semantics).
 # We restore from clean snapshot but DO NOT drop OS cache because this phase is not the measured benchmark.
@@ -88,26 +139,11 @@ maybe_stop_postgres "${CONFIG_PATH}"
 # - ALWAYS drop OS page cache
 # - export [env] variables for postgres getenv
 #
-TMP_BEFORE_LIST="${RUN_DIR}/tmp_trace_before.txt"
-capture_tmp_trace_list "${TMP_BEFORE_LIST}"
-
 restore_clean_snapshot_and_start "${CONFIG_PATH}" "stress-run" "${AKER_CONFIG_OVERRIDE}"
 
 run_bench_cli_numactl run-stress-workload \
     --config "${CONFIG_PATH}" \
     --output-dir "${RUN_DIR}" \
     --invalidate "${INVALIDATE_FRACTION}"
-
-maybe_stop_postgres "${CONFIG_PATH}"
-
-maybe_wait_for_aker_trace_export
-
-collect_new_tmp_traces "${TMP_BEFORE_LIST}" "${RUN_DIR}/tmp_traces" "${MERGED_TMP_DIR}"
-
-docker_cleanup_tmp_traces
-
-maybe_shutdown_docker_container "${CONFIG_PATH}"
-
-collect_postgres_logs "${CONFIG_PATH}" "${RUN_DIR}"
 
 printf "[OK] Stress-workload finished: %s\n" "${RUN_DIR}"
