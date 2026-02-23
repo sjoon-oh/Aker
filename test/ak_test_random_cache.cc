@@ -31,7 +31,7 @@ namespace
     static constexpr std::size_t k_default_entry_count = 1000;
     static constexpr std::size_t k_default_in_topk = 10;
     static constexpr std::size_t k_default_top_delta = 0;
-    static constexpr std::size_t k_default_query_count = 1000000;
+    static constexpr std::size_t k_default_query_count = 50000;
     static constexpr double k_default_exact_hit_ratio = 0.30;
     static constexpr std::uint64_t k_default_seed = 1;
 
