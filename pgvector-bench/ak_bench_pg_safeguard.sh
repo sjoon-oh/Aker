@@ -887,6 +887,150 @@ maybe_wait_for_aker_trace_export() {
     sleep "${wait_sec}"
 }
 
+postgres_get_conf_value() {
+    #
+    # Read a key from postgresql.conf-like file.
+    # - Ignores comment lines starting with '#'.
+    # - Strips trailing inline comments.
+    # - Returns the raw value (may include quotes).
+    #
+    # Args:
+    #   $1: conf_path
+    #   $2: key
+    #
+    local conf_path="$1"
+    local key="$2"
+
+    if [[ -z "${conf_path}" || ! -f "${conf_path}" ]]; then
+        return 0
+    fi
+
+    awk -v key="${key}" '
+        function ltrim(s) { sub(/^[ \t\r\n]+/, "", s); return s }
+        function rtrim(s) { sub(/[ \t\r\n]+$/, "", s); return s }
+        function trim(s)  { return rtrim(ltrim(s)) }
+
+        {
+            line = $0
+            if (line ~ /^[ \t]*#/) { next }
+            sub(/[;#].*$/, "", line)
+            line = trim(line)
+            if (line == "") { next }
+
+            pattern = "^" key "[ \t]*="
+            if (line ~ pattern) {
+                sub(pattern, "", line)
+                line = trim(line)
+                print line
+                exit
+            }
+        }
+    ' "${conf_path}"
+}
+
+postgres_strip_quotes() {
+    local raw="$1"
+    raw="${raw#\"}"
+    raw="${raw%\"}"
+    raw="${raw#\'}"
+    raw="${raw%\'}"
+    printf "%s" "${raw}"
+}
+
+collect_postgres_logs() {
+    #
+    # Copy PostgreSQL logs to the benchmark run directory.
+    #
+    # This is intentionally host-side only:
+    # - In Docker mode, PGDATA and pg_ctl log paths are expected to live under the project root,
+    #   which is bind-mounted into the container at the same absolute path.
+    # - Therefore, after pg_ctl stop (and even after docker stop), logs remain accessible on the host.
+    #
+    # What is collected:
+    # - pg_ctl -l logfile (postgres.pg_log)
+    # - logging_collector output directory (log_directory under postgresql.conf, default: "log")
+    #
+    # Args:
+    #   $1: config_path
+    #   $2: run_dir
+    #
+    local config_path="$1"
+    local run_dir="$2"
+
+    if [[ -z "${config_path}" || -z "${run_dir}" ]]; then
+        log_warn "collect_postgres_logs: missing config_path or run_dir; skip"
+        return 0
+    fi
+
+    local datastore_value
+    datastore_value="$(ini_get_value "${config_path}" "postgres" "datastore" || true)"
+    local datastore_path
+    datastore_path="$(resolve_datastore_path "${datastore_value}")"
+
+    if [[ -z "${datastore_path}" ]]; then
+        log_warn "collect_postgres_logs: postgres.datastore is empty; skip"
+        return 0
+    fi
+
+    local psql_config_path
+    psql_config_path="$(ini_get_value "${config_path}" "postgres" "psql_config" || true)"
+    if [[ -z "${psql_config_path}" && -f "${BENCH_ROOT}/configs/postgresql.conf" ]]; then
+        psql_config_path="configs/postgresql.conf"
+    fi
+    psql_config_path="$(resolve_path_under_root "${psql_config_path}")"
+
+    local pg_log_path
+    pg_log_path="$(ini_get_value "${config_path}" "postgres" "pg_log" || true)"
+    if [[ -z "${pg_log_path}" ]]; then
+        pg_log_path="output/postgres.log"
+    fi
+    pg_log_path="$(resolve_path_under_root "${pg_log_path}")"
+
+    local log_directory
+    log_directory="$(postgres_get_conf_value "${psql_config_path}" "log_directory" || true)"
+    log_directory="$(postgres_strip_quotes "${log_directory}")"
+
+    local log_directory_was_set="1"
+    if [[ -z "${log_directory}" ]]; then
+        log_directory_was_set="0"
+        log_directory="log"
+    fi
+
+    local collector_log_dir
+    collector_log_dir="${log_directory}"
+    if [[ "${collector_log_dir}" != /* ]]; then
+        collector_log_dir="${datastore_path}/${collector_log_dir}"
+    fi
+
+    # Common fallback when log_directory is not explicitly set.
+    if [[ "${log_directory_was_set}" == "0" && ! -d "${collector_log_dir}" ]]; then
+        if [[ -d "${datastore_path}/log" ]]; then
+            collector_log_dir="${datastore_path}/log"
+        elif [[ -d "${datastore_path}/pg_log" ]]; then
+            collector_log_dir="${datastore_path}/pg_log"
+        fi
+    fi
+
+    local dest_dir
+    dest_dir="${run_dir}/postgres_logs"
+    mkdir -p "${dest_dir}"
+
+    if [[ -f "${pg_log_path}" ]]; then
+        log_info "Copying pg_ctl logfile: ${pg_log_path} -> ${dest_dir}/pg_ctl.log"
+        cp -a "${pg_log_path}" "${dest_dir}/pg_ctl.log"
+    else
+        log_warn "pg_ctl logfile not found; skip: ${pg_log_path}"
+    fi
+
+    if [[ -d "${collector_log_dir}" ]]; then
+        log_info "Copying PostgreSQL collector logs: ${collector_log_dir} -> ${dest_dir}/collector/"
+        mkdir -p "${dest_dir}/collector"
+        cp -a "${collector_log_dir}/." "${dest_dir}/collector/" || true
+    else
+        log_warn "PostgreSQL collector log directory not found; skip: ${collector_log_dir}"
+    fi
+}
+
 docker_cleanup_tmp_traces() {
     #
     # Remove trace artifacts under /tmp inside the container to keep it reusable.

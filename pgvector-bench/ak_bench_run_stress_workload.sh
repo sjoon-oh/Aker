@@ -108,4 +108,6 @@ docker_cleanup_tmp_traces
 
 maybe_shutdown_docker_container "${CONFIG_PATH}"
 
+collect_postgres_logs "${CONFIG_PATH}" "${RUN_DIR}"
+
 printf "[OK] Stress-workload finished: %s\n" "${RUN_DIR}"
