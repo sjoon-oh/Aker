@@ -127,7 +127,7 @@ If your Aker-integrated pgvector reads `AKER_CONFIG_PATH` via `getenv()`, you ca
 ### A) Pass via `--aker-config` (recommended)
 
 ```bash
-./ak_bench_run_search_workload.sh --config search_workload_hnsw.ini \
+./ak_bench_run_search_workload.sh --config configs/spacev-1m-small-test.ini \
   --aker-config ../bootstrap/aker-standard.json
 ```
 
@@ -261,7 +261,7 @@ cd pgvector-bench
 
 ```bash
 export AK_BENCH_DOCKER_IMAGE=aker_pgvector_vanilla:latest
-./ak_bench_prepare_storage_pgvector.sh --config search_workload_hnsw.ini
+./ak_bench_prepare_storage_pgvector.sh --config configs/spacev-1m-small-test.ini
 ```
 
 ### 2) Generate workload (run once per dataset/config)
@@ -275,7 +275,7 @@ export GT_NUMPY_WORKERS=16
 export GT_NUMPY_BASE_CHUNK_ROWS=10000
 export GT_NUMPY_QUERY_BATCH_SIZE=32
 
-./ak_bench_generate_workload_from_storage.sh --config search_workload_hnsw.ini
+./ak_bench_generate_workload_from_storage.sh --config configs/spacev-1m-small-test.ini
 ```
 
 ### 3) Run Search-workload benchmark (repeatable per version)
@@ -284,22 +284,22 @@ Vanilla:
 
 ```bash
 export AK_BENCH_DOCKER_IMAGE=aker_pgvector_vanilla:latest
-./ak_bench_run_search_workload.sh --config search_workload_hnsw.ini --output-dir output
+./ak_bench_run_search_workload.sh --config configs/spacev-1m-small-test.ini --output-dir output
 ```
 
 Aker Standard:
 
 ```bash
 export AK_BENCH_DOCKER_IMAGE=aker_pgvector_standard:latest
-./ak_bench_run_search_workload.sh --config search_workload_hnsw.ini --output-dir output \
-  --aker-config ../bootstrap/aker-standard.json
+./ak_bench_run_search_workload.sh --config configs/spacev-1m-small-test.ini --output-dir output \
+  --aker-config configs/aker-standard-bootstrap.ini
 ```
 
 Potluck:
 
 ```bash
 export AK_BENCH_DOCKER_IMAGE=aker_pgvector_potluck:latest
-./ak_bench_run_search_workload.sh --config search_workload_hnsw.ini --output-dir output \
+./ak_bench_run_search_workload.sh --config configs/spacev-1m-small-test.ini --output-dir output \
   --aker-config ../bootstrap/aker-potluck-mode.json
 ```
 
@@ -307,7 +307,7 @@ Proximity:
 
 ```bash
 export AK_BENCH_DOCKER_IMAGE=aker_pgvector_proximity:latest
-./ak_bench_run_search_workload.sh --config search_workload_hnsw.ini --output-dir output \
+./ak_bench_run_search_workload.sh --config configs/spacev-1m-small-test.ini --output-dir output \
   --aker-config ../bootstrap/aker-proximity-mode.json
 ```
 
@@ -323,7 +323,7 @@ export AK_BENCH_DOCKER_IMAGE=aker_pgvector_standard:latest
 
 ```bash
 export AK_BENCH_DOCKER_IMAGE=aker_pgvector_vanilla:latest
-./ak_bench_end_to_end_pgvector.sh --config search_workload_hnsw.ini --workload search --runs 3 --output-dir output
+./ak_bench_end_to_end_pgvector.sh --config configs/spacev-1m-small-test.ini --workload search --runs 3 --output-dir output
 ```
 
 ---
