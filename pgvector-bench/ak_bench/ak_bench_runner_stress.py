@@ -129,7 +129,8 @@ class StressWorkloadRunner:
 
         avg_recall = float(np.mean(recalls)) if recalls else 0.0
 
-        total_time = sum([r["latency"] for r in results])
+        # Keep the same QPS definition as Search-workload: end-to-end wall time.
+        total_time = results[-1]["latency_accumulated"] if results else 0.0
         qps = len(results) / total_time if total_time > 0 else 0.0
 
         # Stress runner only performs searches in the timed phase.

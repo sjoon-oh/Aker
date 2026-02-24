@@ -60,7 +60,10 @@ class PostgresExactGtProvider:
         """Run multi-threaded GT computation for a contiguous range."""
 
         start_idx, end_idx = search_range
-        query_count = end_idx - start_idx
+        query_count = end_idx - start_idx + 1
+
+        if query_count <= 0:
+            return
 
         thread_num = 1
         try:
@@ -73,14 +76,16 @@ class PostgresExactGtProvider:
             thread_num = 1
 
         index_ranges: List[Tuple[int, int]] = []
+        chunk = query_count // thread_num
+        remainder = query_count % thread_num
+        offset = 0
         for i in range(thread_num):
-            sub_start = start_idx + i * (query_count // thread_num)
-            sub_end = (
-                start_idx + (i + 1) * (query_count // thread_num)
-                if i < (thread_num - 1)
-                else end_idx
-            )
-            index_ranges.append((sub_start, sub_end))
+            sub_len = chunk + (1 if i < remainder else 0)
+            sub_start = start_idx + offset
+            sub_end = sub_start + sub_len - 1
+            offset += sub_len
+            if sub_len > 0:
+                index_ranges.append((sub_start, sub_end))
 
         with ThreadPoolExecutor(max_workers=thread_num) as executor:
             futures = []
@@ -121,7 +126,7 @@ class PostgresExactGtProvider:
 
             completed += 1
             if completed % 100 == 0:
-                denom = max(1, (end - start))
+                denom = max(1, (end - start + 1))
                 logging.info("GT thread %d progress: %.2f%%", tid, (completed / denom) * 100.0)
 
         conn.close()

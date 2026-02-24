@@ -54,6 +54,17 @@ container_running() {
     docker ps --format '{{.Names}}' | grep -Fxq "${container_name}" >/dev/null 2>&1
 }
 
+force_recreate="${AK_BENCH_DOCKER_FORCE_RECREATE:-0}"
+docker_seccomp="${AK_BENCH_DOCKER_SECCOMP:-}"
+docker_privileged="${AK_BENCH_DOCKER_PRIVILEGED:-0}"
+
+if [[ "${force_recreate}" == "1" ]] && container_exists; then
+    if container_running; then
+        docker stop "${container_name}" >/dev/null 2>&1 || true
+    fi
+    docker rm -f "${container_name}" >/dev/null 2>&1 || true
+fi
+
 if container_exists; then
     if container_running; then
         printf "[run_container] reuse running container: %s (%s)\n" "${container_name}" "${image_tag}"
@@ -67,12 +78,25 @@ fi
 docker_args=(
     run -d
     --name "${container_name}"
+    --cap-add SYS_NICE
     -e "HOST_UID=$(id -u)"
     -e "HOST_GID=$(id -g)"
     -e "AK_BENCH_USER=akerbench"
     -v "${PROJECT_ROOT}:${PROJECT_ROOT}"
     -w "${PROJECT_ROOT}"
 )
+
+
+if [[ "${docker_privileged}" == "1" ]]; then
+    docker_args+=(--privileged)
+elif [[ -n "${docker_seccomp}" ]]; then
+    if [[ "${docker_seccomp}" == "unconfined" ]]; then
+        docker_args+=(--security-opt seccomp=unconfined)
+    else
+        docker_args+=(--security-opt "seccomp=${docker_seccomp}")
+    fi
+fi
+
 
 if [[ "${network_mode}" == "host" ]]; then
     docker_args+=(--network host)

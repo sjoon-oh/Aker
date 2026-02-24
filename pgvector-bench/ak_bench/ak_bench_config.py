@@ -120,12 +120,45 @@ def loadFromIni(config_path: str) -> BenchConfig:
     parser = configparser.ConfigParser()
     parser.read(config_path)
 
+    def _get_optional_str(section: str, key: str) -> Optional[str]:
+        value = parser.get(section, key, fallback="").strip()
+        if value == "":
+            return None
+        return value
+
+    def _get_optional_int(section: str, key: str) -> Optional[int]:
+        value = parser.get(section, key, fallback="").strip()
+        if value == "":
+            return None
+        try:
+            return int(value)
+        except ValueError as e:
+            raise ValueError(f"Invalid integer for [{section}] {key}: {value!r}") from e
+
+    def _get_int_with_default(section: str, key: str, default: int) -> int:
+        value = parser.get(section, key, fallback="").strip()
+        if value == "":
+            return default
+        try:
+            return int(value)
+        except ValueError as e:
+            raise ValueError(f"Invalid integer for [{section}] {key}: {value!r}") from e
+
+    def _get_optional_float(section: str, key: str) -> Optional[float]:
+        value = parser.get(section, key, fallback="").strip()
+        if value == "":
+            return None
+        try:
+            return float(value)
+        except ValueError as e:
+            raise ValueError(f"Invalid float for [{section}] {key}: {value!r}") from e
+
     #
     # PostgreSQL section.
     #
     postgres = PostgresConfig(
         host=parser.get("postgres", "host"),
-        port=parser.getint("postgres", "port", fallback=5432),
+        port=_get_int_with_default("postgres", "port", 5432),
         user=parser.get("postgres", "user"),
         password=parser.get("postgres", "password"),
         database=parser.get("postgres", "database"),
@@ -135,11 +168,11 @@ def loadFromIni(config_path: str) -> BenchConfig:
     # Dataset section.
     #
     dataset = DatasetConfig(
-        base_path=parser.get("dataset", "base", fallback=None),
+        base_path=_get_optional_str("dataset", "base"),
         search_path=parser.get("dataset", "search"),
         gt_trace_path=parser.get("dataset", "gt_trace"),
-        split_num=parser.getint("dataset", "split_num", fallback=None),
-        dim=parser.getint("dataset", "dim", fallback=None),
+        split_num=_get_optional_int("dataset", "split_num"),
+        dim=_get_optional_int("dataset", "dim"),
     )
 
     #
@@ -148,8 +181,8 @@ def loadFromIni(config_path: str) -> BenchConfig:
     workload = WorkloadConfig(
         wtype=parser.get("workload", "wtype"),
         name=parser.get("workload", "name", fallback="unknown"),
-        limit=parser.getint("workload", "limit", fallback=10),
-        insert_ratio=parser.getfloat("workload", "insert_ratio", fallback=None),
+        limit=_get_int_with_default("workload", "limit", 10),
+        insert_ratio=_get_optional_float("workload", "insert_ratio"),
     )
 
     #
@@ -158,9 +191,8 @@ def loadFromIni(config_path: str) -> BenchConfig:
     index_type = parser.get("pgvector", "type")
     index_name = parser.get("pgvector", "index_name", fallback="")
     if index_name.strip() == "":
-        # Preserve the legacy fallback behavior (even though it is flawed),
-        # but make it explicit.
-        index_name = f"index_${index_type}_idx"
+        # Keep a deterministic fallback index name when configs omit it.
+        index_name = f"index_{index_type}_idx"
 
     distance_type = parser.get("pgvector", "distance", fallback="vector_l2_ops")
 
@@ -168,17 +200,22 @@ def loadFromIni(config_path: str) -> BenchConfig:
         index_type=index_type,
         index_name=index_name,
         distance_type=distance_type,
-        m=parser.getint("pgvector", "m", fallback=16),
-        ef_construction=parser.getint("pgvector", "ef_construction", fallback=64),
-        nlist=parser.getint("pgvector", "nlist", fallback=100),
-        ef_search=parser.getint("pgvector", "ef_search", fallback=None),
-        nprobe=parser.getint("pgvector", "nprobe", fallback=None),
+        m=_get_int_with_default("pgvector", "m", 16),
+        ef_construction=_get_int_with_default("pgvector", "ef_construction", 64),
+        nlist=_get_int_with_default("pgvector", "nlist", 100),
+        ef_search=_get_optional_int("pgvector", "ef_search"),
+        nprobe=_get_optional_int("pgvector", "nprobe"),
     )
 
-    return BenchConfig(
+    config = BenchConfig(
         config_path=config_path,
         postgres=postgres,
         dataset=dataset,
         pgvector=pgvector,
         workload=workload,
     )
+
+    if config.getWorkloadKind() == "stress" and config.dataset.split_num is None:
+        raise ValueError("dataset.split_num must be set for Stress-workload")
+
+    return config

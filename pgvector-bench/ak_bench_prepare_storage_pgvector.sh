@@ -121,6 +121,8 @@ export_env_from_ini "${CONFIG_PATH}"
 pgctl_start "${DATASTORE_PATH}" "${PSQL_CONFIG_PATH}" "${PG_LOG_PATH}"
 pg_wait_ready "${HOST}" "${PORT}" "${PGUSER}"
 
+log_info "Postgres started, preparing storage..."
+
 # Create table.
 run_bench_cli create-table --config "${CONFIG_PATH}"
 

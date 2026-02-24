@@ -122,7 +122,7 @@ ini_get_value() {
     local section_name="$2"
     local key="$3"
 
-    awk -v section="["section_name"]" -v key="$key" '
+    awk -v section="[${section_name}]" -v key="$key" '
         function ltrim(s) { sub(/^[ \t\r\n]+/, "", s); return s }
         function rtrim(s) { sub(/[ \t\r\n]+$/, "", s); return s }
         function trim(s)  { return rtrim(ltrim(s)) }
@@ -142,14 +142,16 @@ ini_get_value() {
 
             if (!in_section) { next }
 
-            # Match: key = value
-            pattern = "^" key "[ \t]*="
-            if (line ~ pattern) {
-                sub(pattern, "", line)
-                line = trim(line)
-                print line
-                exit
-            }
+            # Match: key = value (case-insensitive key comparison)
+            eq = index(line, "=")
+            if (eq == 0) { next }
+
+            lhs = trim(substr(line, 1, eq - 1))
+            if (tolower(lhs) != tolower(key)) { next }
+
+            rhs = trim(substr(line, eq + 1))
+            print rhs
+            exit
         }
     ' "${ini_path}"
 }
@@ -166,7 +168,7 @@ ini_list_section_kv() {
     local ini_path="$1"
     local section_name="$2"
 
-    awk -v section="["section_name"]" '
+    awk -v section="[${section_name}]" '
         function ltrim(s) { sub(/^[ \t\r\n]+/, "", s); return s }
         function rtrim(s) { sub(/[ \t\r\n]+$/, "", s); return s }
         function trim(s)  { return rtrim(ltrim(s)) }
@@ -401,6 +403,8 @@ docker_ensure_container_running() {
     AK_BENCH_DOCKER_OS_USER_INTERNAL="${AK_BENCH_DOCKER_OS_USER:-akerbench}"
     AK_BENCH_DOCKER_NUMA_NODE_INTERNAL="$(docker_get_numa_node "${config_path}")"
     AK_BENCH_DOCKER_REMOVE_CONTAINER_ON_EXIT_INTERNAL="$(docker_get_remove_container_on_exit "${config_path}")"
+
+    docker_resolve_exec_user
 }
 
 prepare_docker_environment() {
@@ -415,6 +419,110 @@ prepare_docker_environment() {
     if docker_is_enabled_for_config "${config_path}"; then
         docker_ensure_container_running "${config_path}"
     fi
+}
+
+docker_exec_root() {
+    #
+    # Execute a shell command inside the benchmark container as root.
+    # This is used for user/group discovery and recovery when the configured
+    # non-root execution user does not exist.
+    #
+    local inner_cmd="$1"
+
+    docker exec -u 0 \
+        "${AK_BENCH_DOCKER_CONTAINER_INTERNAL}" \
+        bash -lc "cd '${BENCH_ROOT}' && ${inner_cmd}"
+}
+
+docker_resolve_exec_user() {
+    #
+    # Resolve a usable execution user inside the container without rebuilding
+    # images.
+    #
+    # The refactored harness assumes a stable username (default: akerbench), but
+    # the container entrypoint may decide to reuse an existing UID mapping and
+    # skip creating that exact username. This resolver:
+    #   1) Uses the preferred username if it exists.
+    #   2) Falls back to any existing username mapped to the host UID.
+    #   3) Attempts to create the preferred username with host UID/GID.
+    #   4) Falls back to numeric uid:gid as a last resort.
+    #
+    if [[ -z "${AK_BENCH_DOCKER_CONTAINER_INTERNAL}" ]]; then
+        return 0
+    fi
+
+    local preferred_user="${AK_BENCH_DOCKER_OS_USER_INTERNAL}"
+    if [[ "${preferred_user}" =~ ^[0-9]+(:[0-9]+)?$ ]]; then
+        log_info "Docker exec user specified as numeric uid[:gid]: ${preferred_user}"
+        return 0
+    fi
+
+    if docker_exec_root "getent passwd '${preferred_user}' >/dev/null 2>&1"; then
+        return 0
+    fi
+
+    local host_uid
+    local host_gid
+    host_uid="$(id -u)"
+    host_gid="$(id -g)"
+
+    log_warn "Docker user '${preferred_user}' not found in container; resolving (HOST_UID=${host_uid}, HOST_GID=${host_gid})"
+
+    local uid_line=""
+    uid_line="$(docker_exec_root "getent passwd '${host_uid}' 2>/dev/null" || true)"
+    if [[ -n "${uid_line}" ]]; then
+        local existing_user
+        existing_user="${uid_line%%:*}"
+        AK_BENCH_DOCKER_OS_USER_INTERNAL="${existing_user}"
+        log_warn "Using existing container user '${existing_user}' for HOST_UID=${host_uid}"
+        return 0
+    fi
+
+    if ! docker_exec_root "command -v useradd >/dev/null 2>&1 && command -v groupadd >/dev/null 2>&1"; then
+        AK_BENCH_DOCKER_OS_USER_INTERNAL="${host_uid}:${host_gid}"
+        log_warn "Container lacks useradd/groupadd; falling back to numeric uid:gid '${AK_BENCH_DOCKER_OS_USER_INTERNAL}'"
+        log_warn "Some tools may require a passwd entry; consider fixing the image entrypoint if this fails"
+        return 0
+    fi
+
+    local group_line=""
+    local group_name=""
+    group_line="$(docker_exec_root "getent group '${host_gid}' 2>/dev/null" || true)"
+    if [[ -n "${group_line}" ]]; then
+        group_name="${group_line%%:*}"
+    else
+        group_name="${preferred_user}"
+
+        # Try to create the group with the host GID. If the name conflicts,
+        # retry with a deterministic alternative.
+        docker_exec_root "groupadd -g '${host_gid}' '${group_name}' >/dev/null 2>&1" || true
+        group_line="$(docker_exec_root "getent group '${host_gid}' 2>/dev/null" || true)"
+        if [[ -n "${group_line}" ]]; then
+            group_name="${group_line%%:*}"
+        else
+            group_name="${preferred_user}_${host_gid}"
+            docker_exec_root "groupadd -g '${host_gid}' '${group_name}' >/dev/null 2>&1" || true
+            group_line="$(docker_exec_root "getent group '${host_gid}' 2>/dev/null" || true)"
+            if [[ -n "${group_line}" ]]; then
+                group_name="${group_line%%:*}"
+            else
+                # As a last attempt, create the group without forcing the GID.
+                docker_exec_root "groupadd '${group_name}' >/dev/null 2>&1" || true
+            fi
+        fi
+    fi
+
+    docker_exec_root "useradd -m -u '${host_uid}' -g '${group_name}' -s /bin/bash '${preferred_user}' >/dev/null 2>&1" || true
+
+    if docker_exec_root "getent passwd '${preferred_user}' >/dev/null 2>&1"; then
+        AK_BENCH_DOCKER_OS_USER_INTERNAL="${preferred_user}"
+        log_info "Created container user '${preferred_user}' (uid=${host_uid}, gid=${host_gid}) for benchmark execution"
+        return 0
+    fi
+
+    AK_BENCH_DOCKER_OS_USER_INTERNAL="${host_uid}:${host_gid}"
+    log_warn "Failed to create or resolve a named container user; falling back to numeric uid:gid '${AK_BENCH_DOCKER_OS_USER_INTERNAL}'"
+    log_warn "Some tools may require a passwd entry; consider fixing the image entrypoint if this fails"
 }
 
 docker_exec_raw() {
@@ -490,13 +598,25 @@ pg_initdb() {
     local datastore_path="$1"
     local db_superuser="$2"
 
+    if [[ -z "${db_superuser}" ]]; then
+        log_warn "postgres.user is empty; initdb will use the OS user as the database superuser"
+    fi
+
     if [[ -n "${AK_BENCH_DOCKER_CONTAINER_INTERNAL}" ]]; then
-        docker_exec_raw "initdb -D '${datastore_path}' -U '${db_superuser}'"
+        if [[ -n "${db_superuser}" ]]; then
+            docker_exec_raw "initdb -D '${datastore_path}' -U '${db_superuser}'"
+        else
+            docker_exec_raw "initdb -D '${datastore_path}'"
+        fi
         return 0
     fi
 
     require_cmd initdb
-    initdb -D "${datastore_path}" -U "${db_superuser}"
+    if [[ -n "${db_superuser}" ]]; then
+        initdb -D "${datastore_path}" -U "${db_superuser}"
+    else
+        initdb -D "${datastore_path}"
+    fi
 }
 
 pgctl_stop() {
@@ -591,13 +711,37 @@ pg_wait_ready() {
     local port="$2"
     local user="$3"
 
-    require_cmd pg_isready
+    if [[ -z "${AK_BENCH_DOCKER_CONTAINER_INTERNAL}" ]]; then
+        require_cmd pg_isready
+    fi
+
+    if [[ -z "${user}" ]]; then
+        log_warn "postgres.user is empty; pg_isready will use the OS user by default"
+    fi
 
     local max_tries=60
     local i=0
     while [[ ${i} -lt ${max_tries} ]]; do
-        if pg_isready -h "${host}" -p "${port}" -U "${user}" >/dev/null 2>&1; then
-            return 0
+        if [[ -n "${AK_BENCH_DOCKER_CONTAINER_INTERNAL}" ]]; then
+            if [[ -n "${user}" ]]; then
+                if docker_exec_raw "pg_isready -h '${host}' -p '${port}' -U '${user}'" >/dev/null 2>&1; then
+                    return 0
+                fi
+            else
+                if docker_exec_raw "pg_isready -h '${host}' -p '${port}'" >/dev/null 2>&1; then
+                    return 0
+                fi
+            fi
+        else
+            if [[ -n "${user}" ]]; then
+                if pg_isready -h "${host}" -p "${port}" -U "${user}" >/dev/null 2>&1; then
+                    return 0
+                fi
+            else
+                if pg_isready -h "${host}" -p "${port}" >/dev/null 2>&1; then
+                    return 0
+                fi
+            fi
         fi
         sleep 1
         i=$((i + 1))

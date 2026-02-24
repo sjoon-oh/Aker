@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 
 from ak_bench.ak_bench_config import loadFromIni
 from ak_bench.ak_bench_pgvector_admin import PgvectorAdmin
@@ -29,29 +30,48 @@ from ak_bench.ak_bench_workload_gen import SearchWorkloadGenerator, StressWorklo
 
 
 def _addGtBackendArgs(parser: argparse.ArgumentParser) -> None:
+    def _env_int(key: str, default: int) -> int:
+        raw = os.environ.get(key, "").strip()
+        if raw == "":
+            return default
+        try:
+            return int(raw)
+        except ValueError:
+            logging.warning("Ignoring invalid env %s=%r; using default %d", key, raw, default)
+            return default
+
+    def _env_str(key: str, default: str, allowed: tuple[str, ...]) -> str:
+        raw = os.environ.get(key, "").strip()
+        if raw == "":
+            return default
+        if raw not in allowed:
+            logging.warning("Ignoring invalid env %s=%r; using default %s", key, raw, default)
+            return default
+        return raw
+
     parser.add_argument(
         "--gt-backend",
         type=str,
-        default="postgres",
+        default=_env_str("GT_BACKEND", "postgres", ("postgres", "numpy")),
         choices=("postgres", "numpy"),
         help="GT backend: postgres (legacy exact scan) or numpy (SIMD + threaded)",
     )
     parser.add_argument(
         "--gt-numpy-workers",
         type=int,
-        default=8,
+        default=_env_int("GT_NUMPY_WORKERS", 8),
         help="Number of worker threads for numpy GT (only if --gt-backend=numpy)",
     )
     parser.add_argument(
         "--gt-numpy-base-chunk-rows",
         type=int,
-        default=100000,
+        default=_env_int("GT_NUMPY_BASE_CHUNK_ROWS", 100000),
         help="Base chunk rows for numpy GT (only if --gt-backend=numpy)",
     )
     parser.add_argument(
         "--gt-numpy-query-batch-size",
         type=int,
-        default=16,
+        default=_env_int("GT_NUMPY_QUERY_BATCH_SIZE", 16),
         help="Query batch size for numpy GT (only if --gt-backend=numpy)",
     )
 
