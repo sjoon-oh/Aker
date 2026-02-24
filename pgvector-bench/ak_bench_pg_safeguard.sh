@@ -31,6 +31,9 @@ AK_BENCH_DOCKER_REMOVE_CONTAINER_ON_EXIT_INTERNAL="0"
 
 declare -a AK_BENCH_DOCKER_ENV_ARGS=()
 
+# Last pg_ctl stop stderr/stdout captured by pgctl_stop_graceful().
+AK_BENCH_PGCTL_STOP_LAST_OUTPUT=""
+
 resolve_config_path() {
     #
     # Resolve a config path.
@@ -619,25 +622,123 @@ pg_initdb() {
     fi
 }
 
-pgctl_stop() {
+pgctl_stop_graceful() {
+    #
+    # Gracefully stop PostgreSQL using pg_ctl for a specific PGDATA.
+    #
+    # Policy:
+    # - This function does NOT exit the script.
+    # - It returns non-zero only when pg_ctl fails for reasons other than
+    #   "server not running".
+    # - "server not running" cases are treated as success to keep stop idempotent.
+    #
     local datastore_path="$1"
+
+    AK_BENCH_PGCTL_STOP_LAST_OUTPUT=""
+
+    if [[ -z "${datastore_path}" ]]; then
+        log_warn "datastore path is empty; skip pg_ctl stop"
+        return 0
+    fi
 
     if [[ ! -d "${datastore_path}" ]]; then
         log_warn "datastore path not found; skip pg_ctl stop: ${datastore_path}"
         return 0
     fi
 
+    local stop_output=""
     if [[ -n "${AK_BENCH_DOCKER_CONTAINER_INTERNAL}" ]]; then
-        local stop_output=""
         if stop_output="$(docker_exec_raw "pg_ctl -D '${datastore_path}' -m fast stop 2>&1")"; then
             return 0
         fi
-
-        if [[ "${stop_output}" == *"no server running"* ]]; then
-            log_warn "pg_ctl reports no server running; treat stop as success: ${datastore_path}"
-            return 0
+    else
+        if ! command -v pg_ctl >/dev/null 2>&1; then
+            AK_BENCH_PGCTL_STOP_LAST_OUTPUT="pg_ctl not found"
+            return 1
         fi
 
+        if stop_output="$(pg_ctl -D "${datastore_path}" -m fast stop 2>&1)"; then
+            return 0
+        fi
+    fi
+
+    # Treat "not running"-style stop failures as success.
+    if [[ "${stop_output}" == *"no server running"* ]]; then
+        log_warn "pg_ctl reports no server running; treat stop as success: ${datastore_path}"
+        return 0
+    fi
+
+    if [[ "${stop_output}" == *"PID file"* && "${stop_output}" == *"does not exist"* ]]; then
+        log_warn "pg_ctl reports missing PID file; treat stop as success: ${datastore_path}"
+        return 0
+    fi
+
+    AK_BENCH_PGCTL_STOP_LAST_OUTPUT="${stop_output}"
+    return 1
+}
+
+pgctl_stop_force_all() {
+    #
+    # Force-stop PostgreSQL processes for "don't care" paths.
+    #
+    # This is intended for snapshot recovery / rm+cp operations where:
+    # - the target PGDATA may not be the one currently running, and
+    # - postgres may not be running at all.
+    #
+    # Policy:
+    # - MUST NOT exit the script.
+    # - MUST return success (0) even if nothing is running.
+    # - In Docker mode, this stops *all* postgres processes in the container.
+    #
+    local datastore_path="$1"
+
+    if [[ -n "${AK_BENCH_DOCKER_CONTAINER_INTERNAL}" ]]; then
+        # Stop a specific PGDATA if it exists, then kill any remaining postgres processes.
+        docker_exec_root "\
+            set +e; \
+            if [[ -n '${datastore_path}' && -d '${datastore_path}' ]]; then \
+                pg_ctl -D '${datastore_path}' -m immediate stop >/dev/null 2>&1 || true; \
+            fi; \
+            pids=\$(ps -eo pid=,comm= 2>/dev/null | awk '\$2==\"postgres\" {print \$1}'); \
+            if [[ -n \"\${pids}\" ]]; then \
+                kill -TERM \${pids} >/dev/null 2>&1 || true; \
+                sleep 2; \
+                kill -KILL \${pids} >/dev/null 2>&1 || true; \
+            fi; \
+            true\
+        " >/dev/null 2>&1 || true
+        return 0
+    fi
+
+    # Non-Docker mode: do not kill all host postgres processes.
+    if [[ -n "${datastore_path}" && -d "${datastore_path}" ]] && command -v pg_ctl >/dev/null 2>&1; then
+        pg_ctl -D "${datastore_path}" -m immediate stop >/dev/null 2>&1 || true
+    fi
+
+    # If a postmaster.pid exists, try to kill that PID as a last resort.
+    if [[ -n "${datastore_path}" && -f "${datastore_path}/postmaster.pid" ]]; then
+        local pid=""
+        pid="$(head -n 1 "${datastore_path}/postmaster.pid" 2>/dev/null || true)"
+        if [[ -n "${pid}" ]]; then
+            kill -TERM "${pid}" >/dev/null 2>&1 || true
+            sleep 1
+            kill -KILL "${pid}" >/dev/null 2>&1 || true
+        fi
+    fi
+
+    return 0
+}
+
+pgctl_stop() {
+    local datastore_path="$1"
+
+    if pgctl_stop_graceful "${datastore_path}"; then
+        return 0
+    fi
+
+    local stop_output="${AK_BENCH_PGCTL_STOP_LAST_OUTPUT}"
+
+    if [[ -n "${AK_BENCH_DOCKER_CONTAINER_INTERNAL}" ]]; then
         log_err "pg_ctl stop failed (docker mode) for PGDATA=${datastore_path}: ${stop_output}"
         log_err "Aborting benchmark due to unsafe PGDATA operations"
 
@@ -648,19 +749,6 @@ pgctl_stop() {
         fi
 
         exit 1
-    fi
-
-    require_cmd pg_ctl
-
-    # Stop only the instance using this data directory.
-    local stop_output=""
-    if stop_output="$(pg_ctl -D "${datastore_path}" -m fast stop 2>&1)"; then
-        return 0
-    fi
-
-    if [[ "${stop_output}" == *"no server running"* ]]; then
-        log_warn "pg_ctl reports no server running; treat stop as success: ${datastore_path}"
-        return 0
     fi
 
     log_err "pg_ctl stop failed for PGDATA=${datastore_path}: ${stop_output}"
@@ -808,7 +896,7 @@ ensure_clean_snapshot() {
 
     log_info "Creating clean snapshot: ${datastore_clean_path}"
 
-    pgctl_stop "${datastore_path}"
+    pgctl_stop_force_all "${datastore_path}"
 
     if [[ ! -d "${datastore_path}" ]]; then
         log_err "Cannot create clean snapshot; datastore does not exist: ${datastore_path}"
@@ -893,7 +981,7 @@ restore_clean_snapshot_and_start() {
 
     log_info "Restoring clean snapshot for ${purpose}: ${datastore_clean_path} -> ${datastore_path}"
 
-    pgctl_stop "${datastore_path}"
+    pgctl_stop_force_all "${datastore_path}"
 
     rm -rf "${datastore_path}"
     cp -r "${datastore_clean_path}" "${datastore_path}"
@@ -971,7 +1059,7 @@ restore_clean_snapshot_and_start_no_cache_drop() {
 
     log_info "Restoring clean snapshot for ${purpose} (no cache drop): ${datastore_clean_path} -> ${datastore_path}"
 
-    pgctl_stop "${datastore_path}"
+    pgctl_stop_force_all "${datastore_path}"
 
     rm -rf "${datastore_path}"
     cp -r "${datastore_clean_path}" "${datastore_path}"
@@ -1007,6 +1095,30 @@ maybe_stop_postgres() {
     fi
 
     pgctl_stop "${datastore_value}"
+}
+
+
+maybe_stop_postgres_graceful() {
+    #
+    # Graceful stop helper for success paths.
+    # - Does NOT exit the script.
+    # - Returns non-zero if pg_ctl stop fails for reasons other than "not running".
+    #
+    local config_path="$1"
+
+    if [[ -z "${config_path}" ]]; then
+        log_warn "Config path is empty; skip maybe_stop_postgres_graceful"
+        return 0
+    fi
+
+    local datastore_value
+    datastore_value="$(ini_get_value "${config_path}" "postgres" "datastore" || true)"
+    datastore_value="$(resolve_datastore_path "${datastore_value}")"
+    if [[ -z "${datastore_value}" ]]; then
+        return 0
+    fi
+
+    pgctl_stop_graceful "${datastore_value}"
 }
 
 maybe_wait_for_aker_trace_export() {
@@ -1273,7 +1385,7 @@ pgctl_stop_best_effort() {
 
         # Keep going even if pg_ctl stop reports an error.
         log_warn "pg_ctl stop failed (best-effort, docker mode) for PGDATA=${datastore_path}: ${stop_output}"
-        return 1
+        return 0
     fi
 
     if ! command -v pg_ctl >/dev/null 2>&1; then
@@ -1294,7 +1406,7 @@ pgctl_stop_best_effort() {
     fi
 
     log_warn "pg_ctl stop failed (best-effort) for PGDATA=${datastore_path}: ${stop_output}"
-    return 1
+    return 0
 }
 
 maybe_stop_postgres_best_effort() {

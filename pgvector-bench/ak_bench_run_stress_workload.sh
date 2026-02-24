@@ -84,7 +84,19 @@ cleanup() {
         fi
     fi
 
-    maybe_stop_postgres_best_effort "${CONFIG_PATH}" || true
+    # Stop PostgreSQL.
+    # - On success, stop gracefully and propagate failure.
+    # - On error, stop best-effort only.
+    if [[ "${exit_code}" == "0" ]]; then
+        maybe_stop_postgres_graceful "${CONFIG_PATH}"
+        local stop_rc=$?
+        if [[ "${stop_rc}" != "0" ]]; then
+            log_err "PostgreSQL graceful stop failed during cleanup"
+            exit_code=1
+        fi
+    else
+        maybe_stop_postgres_best_effort "${CONFIG_PATH}" || true
+    fi
 
     if [[ "${exit_code}" == "0" ]]; then
         maybe_wait_for_aker_trace_export

@@ -110,7 +110,7 @@ log_info "PGDATA: ${DATASTORE_PATH}"
 log_info "Clean : ${DATASTORE_CLEAN_PATH}"
 
 # Stop and reset PGDATA.
-pgctl_stop "${DATASTORE_PATH}"
+pgctl_stop_force_all "${DATASTORE_PATH}"
 rm -rf "${DATASTORE_PATH}" "${DATASTORE_CLEAN_PATH}"
 mkdir -p "$(dirname -- "${DATASTORE_PATH}")"
 
