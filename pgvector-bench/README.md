@@ -268,6 +268,13 @@ export AK_BENCH_DOCKER_IMAGE=aker_pgvector_vanilla:latest
 
 ```bash
 export AK_BENCH_DOCKER_IMAGE=aker_pgvector_vanilla:latest
+
+# Optional: Select numpy as backend
+export GT_BACKEND=numpy
+export GT_NUMPY_WORKERS=16
+export GT_NUMPY_BASE_CHUNK_ROWS=10000
+export GT_NUMPY_QUERY_BATCH_SIZE=32
+
 ./ak_bench_generate_workload_from_storage.sh --config search_workload_hnsw.ini
 ```
 

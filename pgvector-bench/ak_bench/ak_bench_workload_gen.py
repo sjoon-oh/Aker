@@ -21,6 +21,33 @@ from ak_bench.ak_bench_pg import PostgresClient
 from ak_bench.ak_bench_trace_schema import makeInsertEntry, makeSearchEntry, saveTrace
 
 
+def _inferBaseVectorCountFromPath(base_path: str) -> int:
+    """Infer total base vector count from one or more .npy files.
+
+    This is used to avoid PostgreSQL dependency when gt_backend=="numpy".
+    Assumption: DB ids are contiguous starting at 0 and match the base file order.
+    """
+
+    file_paths: List[str]
+    if "*" in base_path:
+        file_paths = sorted(glob.glob(base_path))
+    else:
+        file_paths = [base_path]
+
+    if not file_paths:
+        raise FileNotFoundError(f"No base files matched: {base_path}")
+
+    total = 0
+    for file_path in file_paths:
+        arr = np.load(file_path, mmap_mode="r")
+        total += int(arr.shape[0])
+
+    if total <= 0:
+        raise RuntimeError(f"Invalid base vector count inferred from {base_path}: {total}")
+
+    return total
+
+
 class SearchWorkloadGenerator:
     """Generate a Search-workload trace (legacy workload A format)."""
 
@@ -54,8 +81,10 @@ class SearchWorkloadGenerator:
             if self._config.dataset.base_path is None:
                 raise ValueError("dataset.base must be set when --gt-backend=numpy")
 
-            # Query the current max id. We assume ids are contiguous starting at 0.
-            base_count = self._getDbMaxIdPlusOne()
+            # Infer the base row count from the base vector files.
+            # Assumption: DB ids are contiguous starting at 0 and match base file order.
+            base_count = _inferBaseVectorCountFromPath(self._config.dataset.base_path)
+            logging.info("Inferred base vector count from dataset.base: %d", base_count)
 
             NumpyExactGtProvider(
                 self._config,
@@ -141,10 +170,20 @@ class StressWorkloadGenerator:
         insert_trace = [makeInsertEntry(v) for v in insert_vectors]
 
         #
-        # Match legacy semantics: insert vectors into DB before computing GT.
+        # Match legacy semantics: compute GT after inserts.
+        # - postgres backend: physically insert into DB, then compute GT via exact scan.
+        # - numpy backend: do NOT depend on DB; infer base_count from base files and
+        #   include inserted vectors as an extra segment during GT computation.
         #
-        base_count_before_inserts = self._getDbMaxIdPlusOne()
-        self._bulkInsertIntoDb(insert_trace, start_id=base_count_before_inserts)
+        base_count_before_inserts: int
+        if gt_backend == "postgres":
+            base_count_before_inserts = self._getDbMaxIdPlusOne()
+            self._bulkInsertIntoDb(insert_trace, start_id=base_count_before_inserts)
+        elif gt_backend == "numpy":
+            base_count_before_inserts = _inferBaseVectorCountFromPath(self._config.dataset.base_path)
+            logging.info("Inferred base vector count from dataset.base: %d", base_count_before_inserts)
+        else:
+            raise ValueError(f"Unknown gt_backend: {gt_backend}")
 
         # Compute GT after inserts.
         if gt_backend == "postgres":
