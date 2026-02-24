@@ -3,7 +3,7 @@ import argparse
 import numpy as np
 from pathlib import Path
 
-FILENAME = "spacev-1m-split.npy"
+FILENAME = "spacev-1m.npy"
 NUM_PARTS = 10
 
 parser = argparse.ArgumentParser()
