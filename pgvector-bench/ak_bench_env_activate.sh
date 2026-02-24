@@ -57,7 +57,7 @@ ensure_venv() {
         # shellcheck disable=SC1091
         source "${VENV_DIR}/bin/activate"
         pip install --upgrade pip >/dev/null
-        pip install numpy psycopg pgvector >/dev/null
+        pip install numpy psycopg pgvector psycopg-binary >/dev/null
     else
         # shellcheck disable=SC1091
         source "${VENV_DIR}/bin/activate"
