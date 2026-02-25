@@ -64,37 +64,26 @@ This builds:
 - `aker_pgvector_potluck:latest`
 - `aker_pgvector_proximity:latest`
 
+### Debug base image (Option B)
+
+For iterative debugging (edit local code -> rebuild inside container -> run), build the debug base image **once** on top of the vanilla image:
+
+```bash
+# From project root:
+./docker/scripts/build_images.sh
+./docker/scripts/build_debug_base_image.sh
+```
+
+This adds:
+
+- `aker_pgvector_debug_base:latest`
+
+The debug base image keeps PostgreSQL + upstream pgvector intact, but includes build dependencies and FAISS so the runtime rebuild step is fast.
+
 Notes:
 
 - These images compile PostgreSQL 16.2 from the official source tarball and install pgvector v0.8.0.
 - Aker-integrated images additionally apply `apps/pgvector/pgvector.patch` and build Aker in the selected mode.
-
-### Debug images (local iteration)
-
-The standard images bake the Aker + pgvector build into the image. For faster debugging, this repository also provides **debug images** that:
-
-- start from the **vanilla** pgvector image,
-- install build toolchains (CMake/Ninja, etc.) and FAISS,
-- include a baseline Aker source tree,
-- and let the benchmark runner **copy your local modified sources into a throwaway /tmp workspace** inside a *temporary container*.
-
-Build debug images from the project root:
-
-```bash
-./docker/scripts/build_debug_images.sh
-```
-
-This builds:
-
-- `aker_pgvector_standard_debug:latest`
-- `aker_pgvector_potluck_debug:latest`
-- `aker_pgvector_proximity_debug:latest`
-
-Then run the debug benchmark entrypoint from `pgvector-bench/`:
-
-```bash
-./ak_bench_run_search_debug.sh --config configs/<your-config>.ini --output-dir output --aker-config configs/<aker-bootstrap>.ini
-```
 
 ---
 
@@ -208,6 +197,39 @@ To inspect leftover containers:
 ```bash
 docker ps -a | grep akerbench
 ```
+
+---
+
+## Debug run: search-workload (rebuild Aker + pgvector from local sources)
+
+`ak_bench_run_search_debug.sh` is a debug variant of `ak_bench_run_search_workload.sh`.
+
+Before starting PostgreSQL, it rebuilds inside the container:
+
+- Aker from a baseline checkout (`/opt/src/aker`) **overwritten with local** `inc/`, `src/`, and (if present) `test/`
+- pgvector from a local clone at `apps/pgvector/pgvector` (you own this working tree)
+
+Example:
+
+```bash
+./ak_bench_run_search_debug.sh \
+  --aker-mode standard \
+  --config configs/spacev-1m-small-test.ini \
+  --output-dir output \
+  --aker-build-type Debug \
+  --aker-config configs/aker-standard-bootstrap.ini
+```
+
+Optional flags:
+
+- `--aker-mode standard|potluck|proximity` (default: `standard`)
+- `--aker-build-type Release|Debug|RelWithDebInfo` (default: `Release`)
+- `--docker-image <tag>` (default: `aker_pgvector_debug_base:latest`)
+
+Notes:
+
+- This script forces `docker.remove_container_on_exit=1` and recreates the container for each run.
+- The local pgvector repository **must exist** at `apps/pgvector/pgvector`.
 
 ---
 

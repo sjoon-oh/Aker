@@ -3,29 +3,19 @@
 set -euo pipefail
 
 #
-# Run Search-workload benchmark in a *temporary* debug container.
+# Debug variant of Search-workload benchmark.
 #
-# Goal:
-# - Avoid rebuilding Docker images for each code edit.
-# - Rebuild and install Aker + pgvector inside a fresh container each run.
-# - Remove the container at the end so the debug image remains untouched.
-#
-# Workflow:
-#   1) Launch a debug container based on vanilla PostgreSQL + pgvector.
-#   2) Copy host-side modified sources into /tmp inside the container:
-#        - <project>/inc/
-#        - <project>/src/
-#        - <project>/test/                 (optional)
-#        - <project>/apps/pgvector/pgvector
-#   3) Rebuild + install Aker (selected mode) and rebuild + install pgvector.
-#   4) Run the same benchmark pipeline as ak_bench_run_search_workload.sh.
-#   5) Stop + remove the container.
+# Differences vs ak_bench_run_search_workload.sh:
+# - Uses a *debug base* Docker image (derived from pgvector vanilla) that contains build deps + FAISS.
+# - Before starting PostgreSQL, it rebuilds:
+#   1) Aker from a baseline checkout (image) + local overrides (inc/src/test)
+#   2) pgvector from a locally cloned repo (apps/pgvector/pgvector)
+# - The container is removed after the run (docker rm), keeping the base image untouched.
 #
 # Assumption: user launches this script from the pgvector-bench working directory.
 #
 
 BENCH_ROOT="$(pwd)"
-
 # shellcheck disable=SC1091
 source "${BENCH_ROOT}/ak_bench_env_activate.sh"
 # shellcheck disable=SC1091
@@ -36,8 +26,10 @@ OUTPUT_ROOT="output"
 FORCE_GENERATE=false
 AKER_CONFIG_OVERRIDE=""
 
-# Debug mode selection.
-AKER_MODE="${AK_BENCH_DEBUG_AKER_MODE:-standard}"
+# Debug build options.
+AKER_DEBUG_MODE="${AKER_DEBUG_MODE:-standard}"
+AKER_DEBUG_BUILD_TYPE="${AKER_DEBUG_BUILD_TYPE:-Release}"
+DEBUG_IMAGE_DEFAULT="${AK_BENCH_DEBUG_DOCKER_IMAGE:-aker_pgvector_debug_base:latest}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -57,8 +49,16 @@ while [[ $# -gt 0 ]]; do
             AKER_CONFIG_OVERRIDE="$2"
             shift 2
             ;;
-        --mode)
-            AKER_MODE="$2"
+        --aker-mode)
+            AKER_DEBUG_MODE="$2"
+            shift 2
+            ;;
+        --aker-build-type)
+            AKER_DEBUG_BUILD_TYPE="$2"
+            shift 2
+            ;;
+        --docker-image)
+            DEBUG_IMAGE_DEFAULT="$2"
             shift 2
             ;;
         *)
@@ -73,21 +73,27 @@ if [[ -z "${CONFIG_PATH}" ]]; then
     exit 1
 fi
 
-case "${AKER_MODE}" in
-    standard|potluck|proximity)
-        ;;
-    *)
-        printf "--mode must be one of: standard|potluck|proximity (got: %s)\n" "${AKER_MODE}" >&2
-        exit 1
-        ;;
-esac
-
 CONFIG_PATH="$(resolve_config_path "${CONFIG_PATH}")"
+
+# Force docker mode.
+export AK_BENCH_DOCKER_IMAGE="${DEBUG_IMAGE_DEFAULT}"
+
+# Ensure the debug container is ephemeral.
+export AK_BENCH_DOCKER_REMOVE_CONTAINER_ON_EXIT=1
+export AK_BENCH_DOCKER_FORCE_RECREATE=1
+
+# Local pgvector source must exist.
+LOCAL_PGVECTOR_DIR="${PROJECT_ROOT}/apps/pgvector/pgvector"
+if [[ ! -d "${LOCAL_PGVECTOR_DIR}" ]]; then
+    log_err "Local pgvector repo is missing: ${LOCAL_PGVECTOR_DIR}"
+    log_err "Clone pgvector v0.8.0 into that path and apply your local modifications."
+    exit 1
+fi
 
 mkdir -p "${OUTPUT_ROOT}"
 
 RUN_ID="$(date +%Y%m%d_%H%M%S)"
-RUN_DIR="${OUTPUT_ROOT}/runs/search_debug_${AKER_MODE}_${RUN_ID}"
+RUN_DIR="${OUTPUT_ROOT}/runs/search_debug_${RUN_ID}"
 MERGED_TMP_DIR="${OUTPUT_ROOT}/merged_tmp_traces"
 mkdir -p "${RUN_DIR}" "${MERGED_TMP_DIR}"
 
@@ -110,9 +116,6 @@ cleanup() {
         fi
     fi
 
-    # Stop PostgreSQL.
-    # - On success, stop gracefully and propagate failure.
-    # - On error, stop best-effort only.
     if [[ "${exit_code}" == "0" ]]; then
         maybe_stop_postgres_graceful "${CONFIG_PATH}"
         local stop_rc=$?
@@ -124,7 +127,6 @@ cleanup() {
         maybe_stop_postgres_best_effort "${CONFIG_PATH}" || true
     fi
 
-    # Avoid long waits on error by default.
     if [[ "${exit_code}" == "0" ]]; then
         maybe_wait_for_aker_trace_export
     else
@@ -152,37 +154,24 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-require_cmd docker
+capture_tmp_trace_list "${TMP_BEFORE_LIST}"
 
-docker_image_exists() {
-    local image_tag="$1"
-    docker image inspect "${image_tag}" >/dev/null 2>&1
-}
+prepare_docker_environment "${CONFIG_PATH}"
 
-select_debug_image() {
-    # Allow users to override the image manually.
-    if [[ -n "${AK_BENCH_DOCKER_IMAGE:-}" ]]; then
-        printf "%s" "${AK_BENCH_DOCKER_IMAGE}"
-        return 0
-    fi
+rebuild_debug_stack_in_container() {
+    local mode="$1"
+    local build_type="$2"
 
-    local prefix="${AK_BENCH_DEBUG_IMAGE_PREFIX:-aker_pgvector}"
-    printf "%s_%s_debug:latest" "${prefix}" "${AKER_MODE}"
-}
-
-debug_rebuild_and_install_in_container() {
-    local image_tag="$1"
-    local project_root
-    project_root="$(cd "${BENCH_ROOT}/.." && pwd)"
-
-    local host_nproc
-    host_nproc="$(nproc)"
-
-    local work_dir
-    work_dir="/tmp/aker_debug_${RUN_ID}"
+    case "${mode}" in
+        standard|potluck|proximity) ;;
+        *)
+            log_err "Unknown --aker-mode: ${mode} (expected: standard|potluck|proximity)"
+            exit 1
+            ;;
+    esac
 
     local mode_flags=""
-    case "${AKER_MODE}" in
+    case "${mode}" in
         standard)
             mode_flags="-DAKER_ENABLE_PROXIMITY_MODE=OFF -DAKER_ENABLE_POTLUCK_MODE=OFF"
             ;;
@@ -192,98 +181,44 @@ debug_rebuild_and_install_in_container() {
         proximity)
             mode_flags="-DAKER_ENABLE_PROXIMITY_MODE=ON -DAKER_ENABLE_POTLUCK_MODE=OFF"
             ;;
-        *)
-            log_err "Unexpected AKER_MODE=${AKER_MODE}"
-            exit 1
-            ;;
     esac
 
-    local local_inc="${project_root}/inc"
-    local local_src="${project_root}/src"
-    local local_test="${project_root}/test"
-    local local_pgvector_repo="${project_root}/apps/pgvector/pgvector"
+    local aker_src_dir="/opt/src/aker"
+    local pg_config="/usr/local/pgsql/bin/pg_config"
+    local pgvector_tmp="/tmp/pgvector_debug_src"
 
-    if [[ ! -d "${local_inc}" || ! -d "${local_src}" ]]; then
-        log_err "Expected Aker sources not found under project root: ${project_root}"
-        log_err "Missing required directories: inc/ and/or src/"
-        exit 1
-    fi
+    log_info "[debug] Rebuilding Aker (mode=${mode}, build_type=${build_type}) and pgvector from local sources"
 
-    if [[ ! -d "${local_pgvector_repo}" ]]; then
-        log_err "Local pgvector working tree not found: ${local_pgvector_repo}"
-        log_err "Create it by cloning pgvector v0.8.0 under apps/pgvector/pgvector and apply your edits there."
-        exit 1
-    fi
-
-    local build_log="${RUN_DIR}/container_rebuild_install.log"
-    log_info "Rebuilding Aker (${AKER_MODE}) + pgvector inside container (log: ${build_log})"
-
-    # Build inside a throwaway workspace under /tmp so the image stays pristine.
-    # NOTE: we run as root because installation writes into /usr/local.
-    set +e
     docker_exec_root "\
         set -euo pipefail; \
-        if [[ ! -d /opt/src/aker_base ]]; then \
-            echo 'ERROR: baseline Aker source tree not found: /opt/src/aker_base' >&2; \
-            exit 1; \
-        fi; \
-        rm -rf '${work_dir}'; \
-        mkdir -p '${work_dir}'; \
-        cp -a /opt/src/aker_base '${work_dir}/aker'; \
-        rm -rf '${work_dir}/aker/inc'; cp -a '${local_inc}' '${work_dir}/aker/inc'; \
-        rm -rf '${work_dir}/aker/src'; cp -a '${local_src}' '${work_dir}/aker/src'; \
-        if [[ -d '${local_test}' ]]; then \
-            rm -rf '${work_dir}/aker/test'; cp -a '${local_test}' '${work_dir}/aker/test'; \
-        fi; \
-        cmake -S '${work_dir}/aker' -B '${work_dir}/aker/build' -G Ninja \
-            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+        echo '[debug] Copying local Aker sources (inc/src/test) into baseline checkout'; \
+        rm -rf '${aker_src_dir}/inc' '${aker_src_dir}/src' '${aker_src_dir}/test' || true; \
+        cp -a '${PROJECT_ROOT}/inc' '${aker_src_dir}/' ; \
+        cp -a '${PROJECT_ROOT}/src' '${aker_src_dir}/' ; \
+        if [[ -d '${PROJECT_ROOT}/test' ]]; then cp -a '${PROJECT_ROOT}/test' '${aker_src_dir}/' ; fi; \
+        echo '[debug] Building and installing Aker'; \
+        rm -rf '${aker_src_dir}/build' || true; \
+        cmake -S '${aker_src_dir}' -B '${aker_src_dir}/build' -G Ninja \
+            -DCMAKE_BUILD_TYPE='${build_type}' \
             -DCMAKE_INSTALL_PREFIX=/usr/local \
             ${mode_flags}; \
-        cmake --build '${work_dir}/aker/build' -j${host_nproc}; \
-        cmake --install '${work_dir}/aker/build'; \
+        cmake --build '${aker_src_dir}/build' -j\$(nproc); \
+        cmake --install '${aker_src_dir}/build'; \
         ldconfig; \
-        rm -rf '${work_dir}/pgvector'; \
-        cp -a '${local_pgvector_repo}' '${work_dir}/pgvector'; \
-        cd '${work_dir}/pgvector'; \
-        make -j${host_nproc} PG_CONFIG=/usr/local/pgsql/bin/pg_config; \
-        make PG_CONFIG=/usr/local/pgsql/bin/pg_config install; \
-        echo '[debug] rebuild/install completed'\
-    " >"${build_log}" 2>&1
-    local rc=$?
-    set -e
-
-    if [[ "${rc}" != "0" ]]; then
-        log_err "Container rebuild/install failed (see: ${build_log})"
-        exit "${rc}"
-    fi
-
-    log_info "Container rebuild/install succeeded: ${image_tag}"
+        echo '[debug] Copying local pgvector repo into container tmp and installing'; \
+        rm -rf '${pgvector_tmp}' || true; \
+        mkdir -p '${pgvector_tmp}'; \
+        cp -a '${PROJECT_ROOT}/apps/pgvector/pgvector/.' '${pgvector_tmp}/'; \
+        cd '${pgvector_tmp}'; \
+        make -j\$(nproc) PG_CONFIG='${pg_config}'; \
+        make PG_CONFIG='${pg_config}' install; \
+        ldconfig; \
+        echo '[debug] Build/install done.'\
+    "
 }
 
-# Use a dedicated container name per run to avoid reusing mutable state.
-export AK_BENCH_DOCKER_REMOVE_CONTAINER_ON_EXIT=1
-export AK_BENCH_DOCKER_FORCE_RECREATE=1
-export AK_BENCH_DOCKER_CONTAINER_NAME="akerbench_debug_${AKER_MODE}_${RUN_ID}_5432"
+rebuild_debug_stack_in_container "${AKER_DEBUG_MODE}" "${AKER_DEBUG_BUILD_TYPE}"
 
-AK_BENCH_DOCKER_IMAGE="$(select_debug_image)"
-export AK_BENCH_DOCKER_IMAGE
-
-if ! docker_image_exists "${AK_BENCH_DOCKER_IMAGE}"; then
-    log_err "Debug Docker image not found: ${AK_BENCH_DOCKER_IMAGE}"
-    log_err "Build it from the project root: ./docker/scripts/build_debug_images.sh"
-    exit 1
-fi
-
-# Start container first (required for rebuild/install).
-prepare_docker_environment "${CONFIG_PATH}"
-
-# Capture /tmp trace candidates BEFORE rebuild, so any early trace exports are also collected.
-capture_tmp_trace_list "${TMP_BEFORE_LIST}"
-
-# Rebuild/install Aker + pgvector inside the container.
-debug_rebuild_and_install_in_container "${AK_BENCH_DOCKER_IMAGE}"
-
-# Restore snapshot and start postgres (same as the normal benchmark runner).
 restore_clean_snapshot_and_start "${CONFIG_PATH}" "search" "${AKER_CONFIG_OVERRIDE}"
 
 if [[ "${FORCE_GENERATE}" == "true" ]]; then
@@ -294,4 +229,4 @@ fi
 
 run_bench_cli_numactl run-search-workload --config "${CONFIG_PATH}" --output-dir "${RUN_DIR}"
 
-printf "[OK] Search-workload finished (debug): %s\n" "${RUN_DIR}"
+printf "[OK] Search-debug-workload finished: %s\n" "${RUN_DIR}"
