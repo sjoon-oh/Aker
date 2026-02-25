@@ -80,7 +80,7 @@ export AK_BENCH_DOCKER_IMAGE="${DEBUG_IMAGE_DEFAULT}"
 
 # Ensure the debug container is ephemeral.
 export AK_BENCH_DOCKER_REMOVE_CONTAINER_ON_EXIT=1
-export AK_BENCH_DOCKER_FORCE_RECREATE=1
+export AK_BENCH_DOCKER_FORCE_RECREATE=0
 
 # Local pgvector source must exist.
 LOCAL_PGVECTOR_DIR="${PROJECT_ROOT}/apps/pgvector/pgvector"
@@ -187,15 +187,31 @@ rebuild_debug_stack_in_container() {
     local pg_config="/usr/local/pgsql/bin/pg_config"
     local pgvector_tmp="/tmp/pgvector_debug_src"
 
+    if [[ -z "${AK_BENCH_DOCKER_CONTAINER_INTERNAL:-}" ]]; then
+        log_err "Docker container is not initialized (AK_BENCH_DOCKER_CONTAINER_INTERNAL is empty)"
+        exit 1
+    fi
+
+    local container_name="${AK_BENCH_DOCKER_CONTAINER_INTERNAL}"
+
     log_info "[debug] Rebuilding Aker (mode=${mode}, build_type=${build_type}) and pgvector from local sources"
+
+    log_info "[debug] Overwriting container sources with host working tree"
+    docker_exec_root "rm -rf '${aker_src_dir}/inc' '${aker_src_dir}/src' '${aker_src_dir}/test' '${pgvector_tmp}' || true"
+    docker_exec_root "mkdir -p '${aker_src_dir}' '${pgvector_tmp}'"
+
+    docker cp "${PROJECT_ROOT}/inc" "${container_name}:${aker_src_dir}/"
+    docker cp "${PROJECT_ROOT}/src" "${container_name}:${aker_src_dir}/"
+    if [[ -d "${PROJECT_ROOT}/test" ]]; then
+        docker cp "${PROJECT_ROOT}/test" "${container_name}:${aker_src_dir}/"
+    fi
+
+    # Copy pgvector sources from the host working tree.
+    # Use '/.' to copy contents, and rely on the pre-cleaned destination to avoid stale files.
+    docker cp "${LOCAL_PGVECTOR_DIR}/." "${container_name}:${pgvector_tmp}/"
 
     docker_exec_root "\
         set -euo pipefail; \
-        echo '[debug] Copying local Aker sources (inc/src/test) into baseline checkout'; \
-        rm -rf '${aker_src_dir}/inc' '${aker_src_dir}/src' '${aker_src_dir}/test' || true; \
-        cp -a '${PROJECT_ROOT}/inc' '${aker_src_dir}/' ; \
-        cp -a '${PROJECT_ROOT}/src' '${aker_src_dir}/' ; \
-        if [[ -d '${PROJECT_ROOT}/test' ]]; then cp -a '${PROJECT_ROOT}/test' '${aker_src_dir}/' ; fi; \
         echo '[debug] Building and installing Aker'; \
         rm -rf '${aker_src_dir}/build' || true; \
         cmake -S '${aker_src_dir}' -B '${aker_src_dir}/build' -G Ninja \
@@ -205,10 +221,7 @@ rebuild_debug_stack_in_container() {
         cmake --build '${aker_src_dir}/build' -j\$(nproc); \
         cmake --install '${aker_src_dir}/build'; \
         ldconfig; \
-        echo '[debug] Copying local pgvector repo into container tmp and installing'; \
-        rm -rf '${pgvector_tmp}' || true; \
-        mkdir -p '${pgvector_tmp}'; \
-        cp -a '${PROJECT_ROOT}/apps/pgvector/pgvector/.' '${pgvector_tmp}/'; \
+        echo '[debug] Building and installing pgvector from debug source tree'; \
         cd '${pgvector_tmp}'; \
         make -j\$(nproc) PG_CONFIG='${pg_config}'; \
         make PG_CONFIG='${pg_config}' install; \
@@ -217,7 +230,55 @@ rebuild_debug_stack_in_container() {
     "
 }
 
+verify_debug_installation_or_abort() {
+    #
+    # Verify that:
+    #  1) libaker.so exists in the default install path.
+    #  2) The installed vector.so depends on libaker.so.
+    #
+    # Abort early (with full cleanup) if any check fails.
+    #
+    local pg_config="/usr/local/pgsql/bin/pg_config"
+    local pkglibdir
+    pkglibdir="$(docker_exec_root "${pg_config} --pkglibdir")"
+
+    local libaker_path="/usr/local/lib/libaker.so"
+    local vector_so="${pkglibdir}/vector.so"
+
+    local libaker_exists="NO"
+    if docker_exec_root "test -f '${libaker_path}'"; then
+        libaker_exists="YES"
+    fi
+
+    local vector_depends="NO"
+    if docker_exec_root "test -f '${vector_so}' && ldd '${vector_so}' | grep -q 'libaker\.so'"; then
+        vector_depends="YES"
+    fi
+
+    log_info "[debug] Install verification:"
+    log_info "[debug]   libaker.so exists at ${libaker_path}: ${libaker_exists}"
+    log_info "[debug]   vector.so depends on libaker.so: ${vector_depends} (vector_so=${vector_so})"
+
+    {
+        echo "libaker_path=${libaker_path}"
+        echo "libaker_exists=${libaker_exists}"
+        echo "pkglibdir=${pkglibdir}"
+        echo "vector_so=${vector_so}"
+        echo "vector_depends_on_libaker=${vector_depends}"
+        echo ""
+        echo "ldd_vector_so="
+        docker_exec_root "ldd '${vector_so}' || true"
+    } > "${RUN_DIR}/debug_install_check.txt"
+
+    if [[ "${libaker_exists}" != "YES" || "${vector_depends}" != "YES" ]]; then
+        log_err "[debug] Installation verification failed; aborting run early."
+        log_err "[debug] See ${RUN_DIR}/debug_install_check.txt for details."
+        exit 1
+    fi
+}
+
 rebuild_debug_stack_in_container "${AKER_DEBUG_MODE}" "${AKER_DEBUG_BUILD_TYPE}"
+verify_debug_installation_or_abort
 
 restore_clean_snapshot_and_start "${CONFIG_PATH}" "search" "${AKER_CONFIG_OVERRIDE}"
 
