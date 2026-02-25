@@ -844,7 +844,7 @@ drop_os_page_cache() {
     # Legacy requirement: always drop OS page cache for each benchmark run.
     # Prompts for sudo password are allowed.
     #
-    log_info "Dropping OS page cache (legacy behavior)"
+    log_info "Dropping OS page cache"
 
     if [[ "$(id -u)" -eq 0 ]]; then
         sync

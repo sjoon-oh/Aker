@@ -1,0 +1,78 @@
+# syntax=docker/dockerfile:1
+#
+# Debug image (pgvector + Aker development workflow):
+# - Based on the vanilla pgvector image (PostgreSQL 16.2 + pgvector v0.8.0).
+# - Adds build dependencies for rebuilding Aker and pgvector inside a *temporary*
+#   container.
+# - Pre-installs FAISS (CPU) because Aker links against it.
+# - Clones the upstream Aker repository as a baseline source tree.
+#
+# The debug runner script (pgvector-bench/ak_bench_run_search_debug.sh) will:
+#   1) Launch a temporary container from this image.
+#   2) Copy host-side modified sources into /tmp inside the container.
+#   3) Rebuild + install Aker.
+#   4) Rebuild + install pgvector from a host-side working tree.
+#   5) Run the benchmark pipeline.
+#   6) Stop + remove the container so the image remains untouched.
+#
+
+ARG BASE_IMAGE=aker_pgvector_vanilla:latest
+FROM ${BASE_IMAGE}
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+# Use bash for RUN steps so 'set -euo pipefail' works reliably.
+SHELL ["/bin/bash", "-c"]
+
+# Build dependencies for Aker and pgvector (debug rebuilds).
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        cmake \
+        ninja-build \
+        git \
+        patch \
+        python3 \
+        rsync \
+        libboost-all-dev \
+        libopenblas-dev \
+        libgflags-dev \
+        gfortran \
+    && rm -rf /var/lib/apt/lists/*
+
+# Build and install FAISS (CPU only).
+ARG FAISS_REPO_URL=https://github.com/facebookresearch/faiss.git
+ARG FAISS_REF=
+RUN set -euo pipefail; \
+    git clone --recursive "${FAISS_REPO_URL}" /opt/src/faiss && \
+    cd /opt/src/faiss && \
+    if [ -n "${FAISS_REF}" ]; then \
+        git checkout -f "${FAISS_REF}"; \
+        git submodule update --init --recursive; \
+    fi && \
+    cmake -B build . \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr/local \
+        -DFAISS_ENABLE_GPU=OFF \
+        -DFAISS_ENABLE_PYTHON=OFF \
+        -DFAISS_ENABLE_CUVS=OFF \
+        -DBUILD_SHARED_LIBS=ON \
+        -DFAISS_ENABLE_C_API=ON \
+        -DFAISS_ENABLE_MKL=OFF && \
+    make -C build -j"$(nproc)" faiss && \
+    make -C build -j"$(nproc)" faiss_avx2 && \
+    make -C build -j"$(nproc)" faiss_avx512 && \
+    make -C build install && \
+    ldconfig
+
+# Clone a baseline Aker repository. The debug runner overlays host-side
+# modifications into a throwaway workspace under /tmp.
+ARG AKER_SRC_BASE=/opt/src/aker_base
+ARG AKER_REPO_URL=https://github.com/sjoon-oh/Aker.git
+ARG AKER_REF=release
+RUN set -euo pipefail; \
+    git clone "${AKER_REPO_URL}" "${AKER_SRC_BASE}" && \
+    cd "${AKER_SRC_BASE}" && \
+    git checkout -f "${AKER_REF}" && \
+    git submodule update --init --recursive
+
+ENV AKER_DEBUG_BASE_SRC="${AKER_SRC_BASE}"

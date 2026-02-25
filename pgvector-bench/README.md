@@ -69,6 +69,33 @@ Notes:
 - These images compile PostgreSQL 16.2 from the official source tarball and install pgvector v0.8.0.
 - Aker-integrated images additionally apply `apps/pgvector/pgvector.patch` and build Aker in the selected mode.
 
+### Debug images (local iteration)
+
+The standard images bake the Aker + pgvector build into the image. For faster debugging, this repository also provides **debug images** that:
+
+- start from the **vanilla** pgvector image,
+- install build toolchains (CMake/Ninja, etc.) and FAISS,
+- include a baseline Aker source tree,
+- and let the benchmark runner **copy your local modified sources into a throwaway /tmp workspace** inside a *temporary container*.
+
+Build debug images from the project root:
+
+```bash
+./docker/scripts/build_debug_images.sh
+```
+
+This builds:
+
+- `aker_pgvector_standard_debug:latest`
+- `aker_pgvector_potluck_debug:latest`
+- `aker_pgvector_proximity_debug:latest`
+
+Then run the debug benchmark entrypoint from `pgvector-bench/`:
+
+```bash
+./ak_bench_run_search_debug.sh --config configs/<your-config>.ini --output-dir output --aker-config configs/<aker-bootstrap>.ini
+```
+
 ---
 
 ## Docker mode is required (how to select the image)
