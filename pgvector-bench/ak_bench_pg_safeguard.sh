@@ -761,6 +761,8 @@ pgctl_start() {
     local psql_config_path="$2"
     local pg_log_path="$3"
 
+    local enable_core_dump="${AK_BENCH_ENABLE_CORE_DUMP:-0}"
+
     if [[ ! -d "${datastore_path}" ]]; then
         log_err "datastore path not found; cannot pg_ctl start: ${datastore_path}"
         exit 1
@@ -776,8 +778,16 @@ pgctl_start() {
             extra_opts="${extra_opts} -o --config-file=${psql_config_path}"
         fi
 
+        local core_prefix=""
+        if [[ "${enable_core_dump}" == "1" ]]; then
+            # If core_pattern is relative, the core file is written to the process CWD.
+            # Use PGDATA as a stable, writable working directory.
+            core_prefix="cd '${datastore_path}'; ulimit -c unlimited;"
+        fi
+
         docker_exec_raw_with_env "\
             set -euo pipefail; \
+            ${core_prefix} \
             numa_prefix=(); \
             if [[ -n '${numa_node}' ]]; then numa_prefix=(numactl --cpunodebind='${numa_node}' --membind='${numa_node}'); fi; \
             \"\${numa_prefix[@]}\" pg_ctl -D '${datastore_path}' -l '${pg_log_path}' ${extra_opts} start >/dev/null\
@@ -786,6 +796,13 @@ pgctl_start() {
     fi
 
     require_cmd pg_ctl
+
+    if [[ "${enable_core_dump}" == "1" ]]; then
+        # If core_pattern is relative, the core file is written to the process CWD.
+        # Use PGDATA as a stable, writable working directory.
+        cd "${datastore_path}" || true
+        ulimit -c unlimited || true
+    fi
 
     if [[ -n "${psql_config_path}" ]]; then
         pg_ctl -D "${datastore_path}" -l "${pg_log_path}" -o "--config-file=${psql_config_path}" start >/dev/null

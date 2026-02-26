@@ -82,6 +82,11 @@ export AK_BENCH_DOCKER_IMAGE="${DEBUG_IMAGE_DEFAULT}"
 export AK_BENCH_DOCKER_REMOVE_CONTAINER_ON_EXIT=1
 export AK_BENCH_DOCKER_FORCE_RECREATE=0
 
+# Enable core dumps in postgres processes and attempt to collect a gdb backtrace
+# from the newest core file when the run fails.
+export AK_BENCH_ENABLE_CORE_DUMP="${AK_BENCH_ENABLE_CORE_DUMP:-1}"
+export AK_BENCH_GDB_CORE_BT_ON_ERROR="${AK_BENCH_GDB_CORE_BT_ON_ERROR:-1}"
+
 # Local pgvector source must exist.
 LOCAL_PGVECTOR_DIR="${PROJECT_ROOT}/apps/pgvector/pgvector"
 if [[ ! -d "${LOCAL_PGVECTOR_DIR}" ]]; then
@@ -100,6 +105,170 @@ mkdir -p "${RUN_DIR}" "${MERGED_TMP_DIR}"
 TMP_BEFORE_LIST="${RUN_DIR}/tmp_trace_before.txt"
 CLEANUP_DONE=0
 
+debug_prepare_core_dump_environment() {
+    #
+    # Best-effort preparation for core dumps:
+    # - Record core_pattern and ulimit -c for debugging.
+    # - If core_pattern is an absolute path, ensure its directory exists and is writable.
+    # - If core_pattern is relative, core is written to the postgres process CWD.
+    #   The safeguard script starts postgres from PGDATA when AK_BENCH_ENABLE_CORE_DUMP=1.
+    #
+    local config_path="$1"
+
+    if [[ "${AK_BENCH_ENABLE_CORE_DUMP:-0}" != "1" ]]; then
+        return 0
+    fi
+
+    if [[ -z "${AK_BENCH_DOCKER_CONTAINER_INTERNAL:-}" ]]; then
+        return 0
+    fi
+
+    local datastore_path
+    datastore_path="$(ini_get_value "${config_path}" "postgres" "datastore" || true)"
+    datastore_path="$(resolve_datastore_path "${datastore_path}")"
+
+    local core_pattern
+    core_pattern="$(docker_exec_root "cat /proc/sys/kernel/core_pattern 2>/dev/null || true" | tr -d '\r')"
+
+    local ulimit_c
+    ulimit_c="$(docker_exec_root "ulimit -c 2>/dev/null || true" | tr -d '\r')"
+
+    {
+        printf "timestamp_utc=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        printf "core_pattern=%s\n" "${core_pattern}"
+        printf "ulimit_c=%s\n" "${ulimit_c}"
+        printf "datastore_path=%s\n" "${datastore_path}"
+    } > "${RUN_DIR}/core_dump_settings.txt"
+
+    if [[ -z "${core_pattern}" ]]; then
+        return 0
+    fi
+
+    # core_pattern starting with '|' means cores are piped to a handler (no file to find).
+    if [[ "${core_pattern}" == \|* ]]; then
+        log_warn "[debug] core_pattern is a pipe; core files may not be created as regular files: ${core_pattern}"
+        return 0
+    fi
+
+    if [[ "${core_pattern}" == /* ]]; then
+        local core_dir
+        core_dir="$(dirname -- "${core_pattern}")"
+        log_info "[debug] Ensuring core dump directory exists and is writable: ${core_dir}"
+        docker_exec_root "mkdir -p '${core_dir}' || true"
+        # Best-effort: make writable for postgres user.
+        docker_exec_root "chmod 1777 '${core_dir}' >/dev/null 2>&1 || true"
+    else
+        # Relative core: ensure PGDATA is writable.
+        docker_exec_root "test -d '${datastore_path}' && test -w '${datastore_path}'" >/dev/null 2>&1 || true
+    fi
+}
+
+maybe_collect_gdb_backtrace_on_error() {
+    local config_path="$1"
+    local out_dir="$2"
+
+    if [[ "${AK_BENCH_GDB_CORE_BT_ON_ERROR:-0}" != "1" ]]; then
+        return 0
+    fi
+
+    if [[ -z "${AK_BENCH_DOCKER_CONTAINER_INTERNAL:-}" ]]; then
+        return 0
+    fi
+
+    if ! docker_exec_root "command -v gdb >/dev/null 2>&1"; then
+        log_warn "[debug] gdb not found in container; skipping core backtrace collection"
+        printf "gdb_not_found=1\n" > "${out_dir}/gdb_core_info.txt"
+        return 0
+    fi
+
+    local datastore_path
+    datastore_path="$(ini_get_value "${config_path}" "postgres" "datastore" || true)"
+    datastore_path="$(resolve_datastore_path "${datastore_path}")"
+
+    local core_info_path="${out_dir}/gdb_core_info.txt"
+    local gdb_out_path="${out_dir}/gdb_backtrace.txt"
+
+    local core_pattern
+    core_pattern="$(docker_exec_root "cat /proc/sys/kernel/core_pattern 2>/dev/null || true" | tr -d '\r')"
+    local ulimit_c
+    ulimit_c="$(docker_exec_root "ulimit -c 2>/dev/null || true" | tr -d '\r')"
+
+    {
+        printf "timestamp_utc=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        printf "core_pattern=%s\n" "${core_pattern}"
+        printf "ulimit_c=%s\n" "${ulimit_c}"
+        printf "datastore_path=%s\n" "${datastore_path}"
+    } > "${core_info_path}"
+
+    if [[ "${core_pattern}" == \|* ]]; then
+        log_warn "[debug] core_pattern is a pipe; core files may not be created as regular files: ${core_pattern}"
+        printf "core_pattern_is_pipe=1\n" >> "${core_info_path}"
+        return 0
+    fi
+
+    local core_dir=""
+    if [[ "${core_pattern}" == /* ]]; then
+        core_dir="$(dirname -- "${core_pattern}")"
+        printf "core_dir=%s\n" "${core_dir}" >> "${core_info_path}"
+    fi
+
+    local core_path=""
+    core_path="$(docker_exec_root "\
+        set -euo pipefail; \
+        dirs=( '${BENCH_ROOT}' '${datastore_path}' /tmp ); \
+        if [[ -n '${core_dir}' ]]; then dirs+=( '${core_dir}' ); fi; \
+        best=''; best_ts=0; \
+        for d in \"\${dirs[@]}\"; do \
+            [[ -d \"\${d}\" ]] || continue; \
+            while IFS= read -r -d '' f; do \
+                ts=\"\$(stat -c %Y \"\${f}\" 2>/dev/null || echo 0)\"; \
+                if [[ \"\${ts}\" -gt \"\${best_ts}\" ]]; then best_ts=\"\${ts}\"; best=\"\${f}\"; fi; \
+            done < <(find \"\${d}\" -maxdepth 3 -type f -name 'core*' -print0 2>/dev/null || true); \
+        done; \
+        if [[ -n \"\${best}\" ]]; then printf '%s' \"\${best}\"; fi\
+    " | tr -d '\r')"
+
+    if [[ -z "${core_path}" ]]; then
+        log_warn "[debug] No core file found; see ${core_info_path}"
+        printf "core_found=NO\n" >> "${core_info_path}"
+        return 0
+    fi
+
+    printf "core_found=YES\n" >> "${core_info_path}"
+    printf "core_path=%s\n" "${core_path}" >> "${core_info_path}"
+
+    # Export the core file to the host run directory for offline inspection.
+    local core_basename
+    core_basename="$(basename -- "${core_path}")"
+    local exported_core_path="${out_dir}/${core_basename}"
+    if docker cp "${AK_BENCH_DOCKER_CONTAINER_INTERNAL}:${core_path}" "${exported_core_path}" >/dev/null 2>&1; then
+        printf "core_exported=YES\n" >> "${core_info_path}"
+        printf "core_exported_path=%s\n" "${exported_core_path}" >> "${core_info_path}"
+        log_info "[debug] Exported core file: ${exported_core_path}"
+    else
+        printf "core_exported=NO\n" >> "${core_info_path}"
+        log_warn "[debug] Failed to docker cp core file; see ${core_info_path}"
+    fi
+
+    local postgres_bin="/usr/local/pgsql/bin/postgres"
+    if ! docker_exec_root "test -x '${postgres_bin}'"; then
+        postgres_bin="$(docker_exec_root "/usr/local/pgsql/bin/pg_config --bindir 2>/dev/null || true" | tr -d '\r')/postgres"
+    fi
+    printf "postgres_bin=%s\n" "${postgres_bin}" >> "${core_info_path}"
+
+    log_info "[debug] Collecting gdb backtrace from core: ${core_path}"
+    docker_exec_root "\
+        set -euo pipefail; \
+        gdb -q -batch \
+            -ex 'set pagination off' \
+            -ex 'info sharedlibrary' \
+            -ex 'thread apply all bt full' \
+            '${postgres_bin}' '${core_path}' \
+            > '${gdb_out_path}' 2>&1 || true\
+    "
+    log_info "[debug] gdb backtrace saved: ${gdb_out_path}"
+}
+
 cleanup() {
     local exit_code=$?
 
@@ -114,6 +283,10 @@ cleanup() {
         if command -v docker >/dev/null 2>&1; then
             docker logs "${AK_BENCH_DOCKER_CONTAINER_INTERNAL}" > "${RUN_DIR}/docker_container.log" 2>&1 || true
         fi
+    fi
+
+    if [[ "${exit_code}" != "0" ]]; then
+        maybe_collect_gdb_backtrace_on_error "${CONFIG_PATH}" "${RUN_DIR}" || true
     fi
 
     if [[ "${exit_code}" == "0" ]]; then
@@ -157,6 +330,13 @@ trap 'exit 143' TERM
 capture_tmp_trace_list "${TMP_BEFORE_LIST}"
 
 prepare_docker_environment "${CONFIG_PATH}"
+
+# The harness calls prepare_docker_environment() internally as well (e.g., during snapshot restore).
+# Disable force-recreate after the initial container is created so we do not discard rebuilt artifacts.
+export AK_BENCH_DOCKER_FORCE_RECREATE=0
+
+# Best-effort core dump environment preparation (directory permissions, diagnostics).
+debug_prepare_core_dump_environment "${CONFIG_PATH}" || true
 
 rebuild_debug_stack_in_container() {
     local mode="$1"
