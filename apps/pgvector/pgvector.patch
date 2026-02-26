@@ -474,7 +474,7 @@ index a5fac4e..9b5f461 100644
  
  /*
 diff --git a/src/hnswscan.c b/src/hnswscan.c
-index 955998a..6c894f6 100644
+index 955998a..30fbfd4 100644
 --- a/src/hnswscan.c
 +++ b/src/hnswscan.c
 @@ -1,13 +1,18 @@
@@ -707,7 +707,7 @@ index 955998a..6c894f6 100644
  
  		so->first = false;
  
-@@ -224,12 +378,50 @@ hnswgettuple(IndexScanDesc scan, ScanDirection dir)
+@@ -224,11 +378,49 @@ hnswgettuple(IndexScanDesc scan, ScanDirection dir)
  #endif
  	}
  
@@ -746,7 +746,6 @@ index 955998a..6c894f6 100644
  		char	   *base = NULL;
  		HnswSearchCandidate *sc;
  		HnswElement element;
--		ItemPointer heaptid;
 +		/*
 +		 * IMPORTANT: copy the ItemPointerData by value.
 +		 *
@@ -755,21 +754,18 @@ index 955998a..6c894f6 100644
 +		 * heaptid is consumed. Keeping only a pointer into element->heaptids
 +		 * would become a use-after-free and can yield corrupted TIDs.
 +		 */
-+		ItemPointerData heaptid_copy;
+ 		ItemPointer heaptid;
  
  		if (list_length(so->w) == 0)
- 		{
-@@ -293,7 +485,8 @@ hnswgettuple(IndexScanDesc scan, ScanDirection dir)
- 			continue;
+@@ -294,7 +486,6 @@ hnswgettuple(IndexScanDesc scan, ScanDirection dir)
  		}
  
--		heaptid = &element->heaptids[--element->heaptidsLength];
-+		heaptid_copy = element->heaptids[--element->heaptidsLength];
-+		ItemPointer heaptid = &heaptid_copy;
- 
+ 		heaptid = &element->heaptids[--element->heaptidsLength];
+-
  		if (hnsw_iterative_scan == HNSW_ITERATIVE_SCAN_STRICT)
  		{
-@@ -303,11 +496,159 @@ hnswgettuple(IndexScanDesc scan, ScanDirection dir)
+ 			if (sc->distance < so->previousDistance)
+@@ -303,11 +494,160 @@ hnswgettuple(IndexScanDesc scan, ScanDirection dir)
  			so->previousDistance = sc->distance;
  		}
  
@@ -804,8 +800,14 @@ index 955998a..6c894f6 100644
 +					VARSIZE_ANY_EXHDR(vec) - 4);
 +				so->prepared_neighbors++;
 +			}
++
++			scan->xs_heaptid = *heaptid;
++			scan->xs_recheck = false;
++			scan->xs_recheckorderby = false;
  
 -		scan->xs_heaptid = *heaptid;
+-		scan->xs_recheck = false;
+-		scan->xs_recheckorderby = false;
 +			if (so->prepared_neighbors == (int)ak_cache->parameter.capacity.in_topk)
 +			{
 +				const int extras = (int)ak_cache->parameter.capacity.top_delta;
@@ -923,15 +925,12 @@ index 955998a..6c894f6 100644
 +			}
 +		}
 +
-+		scan->xs_heaptid = heaptid_copy;
- 		scan->xs_recheck = false;
- 		scan->xs_recheckorderby = false;
 +
 +		MemoryContextSwitchTo(oldCtx);
  		return true;
  	}
  
-@@ -323,6 +664,36 @@ hnswendscan(IndexScanDesc scan)
+@@ -323,6 +663,36 @@ hnswendscan(IndexScanDesc scan)
  {
  	HnswScanOpaque so = (HnswScanOpaque) scan->opaque;
  
