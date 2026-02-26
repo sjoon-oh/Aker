@@ -362,6 +362,8 @@ namespace aker
         return;
 #endif
 
+        AKER_LOG_DEBUG << "[ANNSCacheMaintenance] Processing write log entries (if needed)";
+
         /* Triggers the slow-path write-log scan if the read-to-repr ratio is high enough.
          */
         static constexpr double k_try_read_ratio_thresh = 0.25;
