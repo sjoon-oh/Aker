@@ -474,7 +474,7 @@ index a5fac4e..9b5f461 100644
  
  /*
 diff --git a/src/hnswscan.c b/src/hnswscan.c
-index 955998a..30fbfd4 100644
+index 955998a..c36736d 100644
 --- a/src/hnswscan.c
 +++ b/src/hnswscan.c
 @@ -1,13 +1,18 @@
@@ -765,7 +765,7 @@ index 955998a..30fbfd4 100644
  		if (hnsw_iterative_scan == HNSW_ITERATIVE_SCAN_STRICT)
  		{
  			if (sc->distance < so->previousDistance)
-@@ -303,11 +494,160 @@ hnswgettuple(IndexScanDesc scan, ScanDirection dir)
+@@ -303,11 +494,152 @@ hnswgettuple(IndexScanDesc scan, ScanDirection dir)
  			so->previousDistance = sc->distance;
  		}
  
@@ -915,22 +915,14 @@ index 955998a..30fbfd4 100644
 +					so->ak_query_id,
 +					cache_entry,
 +					so->ak_query_vector_view);
-+
-+				/* Destroy ephemeral VectorSlots created for insertion (avoid leaks). */
-+				for (int i = 0; i < so->prepared_neighbors; i++)
-+					akerDestroyVectorSlot(vector_ref_list[i]);
-+
-+				if (!inserted)
-+					akerDestroyCacheEntry(cache_entry);
 +			}
 +		}
-+
 +
 +		MemoryContextSwitchTo(oldCtx);
  		return true;
  	}
  
-@@ -323,6 +663,36 @@ hnswendscan(IndexScanDesc scan)
+@@ -323,6 +655,36 @@ hnswendscan(IndexScanDesc scan)
  {
  	HnswScanOpaque so = (HnswScanOpaque) scan->opaque;
  
