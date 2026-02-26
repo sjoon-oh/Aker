@@ -474,7 +474,7 @@ index a5fac4e..9b5f461 100644
  
  /*
 diff --git a/src/hnswscan.c b/src/hnswscan.c
-index 955998a..752a5f9 100644
+index 955998a..6c894f6 100644
 --- a/src/hnswscan.c
 +++ b/src/hnswscan.c
 @@ -1,13 +1,18 @@
@@ -595,30 +595,24 @@ index 955998a..752a5f9 100644
  	if (keys && scan->numberOfKeys > 0)
  		memmove(scan->keyData, keys, scan->numberOfKeys * sizeof(ScanKeyData));
  
-@@ -206,17 +270,115 @@ hnswgettuple(IndexScanDesc scan, ScanDirection dir)
- 		/* Get scan value */
+@@ -207,15 +271,105 @@ hnswgettuple(IndexScanDesc scan, ScanDirection dir)
  		value = GetScanValue(scan);
  
-+		/*
+ 		/*
+-		 * Get a shared lock. This allows vacuum to ensure no in-flight scans
+-		 * before marking tuples as deleted.
 +		 * Legacy patch behavior:
 +		 * - Compute qvid from raw float bytes
 +		 * - Query Aker cache (exact-hit or approx-hit)
 +		 * - If hit, skip index scan entirely
-+		 */
+ 		 */
+-		LockPage(scan->indexRelation, HNSW_SCAN_LOCK, ShareLock);
 +		so->is_cached = false;
 +		so->cached_entry = NULL;
 +		so->cached_in_topk = 0;
 +		so->returned = 0;
 +		so->prepared_neighbors = 0;
 +		so->prepared_results = NULL;
-+
-+		/* Ensure MVCC fetch helpers exist (mixed workloads). */
-+		if (so->iftd == NULL)
-+			so->iftd = table_index_fetch_begin(scan->heapRelation);
-+		if (so->vslot == NULL)
-+			so->vslot = table_slot_create(scan->heapRelation, NULL);
-+		table_index_fetch_reset(so->iftd);
-+		ExecClearTuple(so->vslot);
 +
 +		if (ak_cache != NULL)
 +		{
@@ -661,7 +655,8 @@ index 955998a..752a5f9 100644
 +				so->cached_entry = found_entry;
 +				so->cached_in_topk = (int)ak_cache->parameter.capacity.in_topk;
 +				so->returned = 0;
-+
+ 
+-		so->w = GetScanItems(scan, value);
 +				/*
 +				 * Legacy behavior: on approx-hit, allocate a dummy entry and link it
 +				 * to the representative so that future queries can exact-hit.
@@ -681,20 +676,19 @@ index 955998a..752a5f9 100644
 +				}
 +			}
 +		}
-+
+ 
+-		/* Release shared lock */
+-		UnlockPage(scan->indexRelation, HNSW_SCAN_LOCK, ShareLock);
 +		if (!so->is_cached)
 +		{
- 		/*
- 		 * Get a shared lock. This allows vacuum to ensure no in-flight scans
- 		 * before marking tuples as deleted.
- 		 */
- 		LockPage(scan->indexRelation, HNSW_SCAN_LOCK, ShareLock);
--
- 		so->w = GetScanItems(scan, value);
--
--		/* Release shared lock */
- 		UnlockPage(scan->indexRelation, HNSW_SCAN_LOCK, ShareLock);
- 
++			/*
++			* Get a shared lock. This allows vacuum to ensure no in-flight scans
++			* before marking tuples as deleted.
++			*/
++			LockPage(scan->indexRelation, HNSW_SCAN_LOCK, ShareLock);
++			so->w = GetScanItems(scan, value);
++			UnlockPage(scan->indexRelation, HNSW_SCAN_LOCK, ShareLock);
++
 +			if (ak_cache != NULL)
 +			{
 +				const size_t neighbors =
@@ -710,11 +704,10 @@ index 955998a..752a5f9 100644
 +		{
 +			so->w = NIL;
 +		}
-+
+ 
  		so->first = false;
  
- #if defined(HNSW_MEMORY)
-@@ -224,12 +386,50 @@ hnswgettuple(IndexScanDesc scan, ScanDirection dir)
+@@ -224,12 +378,50 @@ hnswgettuple(IndexScanDesc scan, ScanDirection dir)
  #endif
  	}
  
@@ -766,7 +759,7 @@ index 955998a..752a5f9 100644
  
  		if (list_length(so->w) == 0)
  		{
-@@ -293,7 +493,8 @@ hnswgettuple(IndexScanDesc scan, ScanDirection dir)
+@@ -293,7 +485,8 @@ hnswgettuple(IndexScanDesc scan, ScanDirection dir)
  			continue;
  		}
  
@@ -776,7 +769,7 @@ index 955998a..752a5f9 100644
  
  		if (hnsw_iterative_scan == HNSW_ITERATIVE_SCAN_STRICT)
  		{
-@@ -303,11 +504,157 @@ hnswgettuple(IndexScanDesc scan, ScanDirection dir)
+@@ -303,11 +496,159 @@ hnswgettuple(IndexScanDesc scan, ScanDirection dir)
  			so->previousDistance = sc->distance;
  		}
  
@@ -811,7 +804,8 @@ index 955998a..752a5f9 100644
 +					VARSIZE_ANY_EXHDR(vec) - 4);
 +				so->prepared_neighbors++;
 +			}
-+
+ 
+-		scan->xs_heaptid = *heaptid;
 +			if (so->prepared_neighbors == (int)ak_cache->parameter.capacity.in_topk)
 +			{
 +				const int extras = (int)ak_cache->parameter.capacity.top_delta;
@@ -865,24 +859,26 @@ index 955998a..752a5f9 100644
 +						j--;
 +						continue;
 +					}
-+
-+					ItemPointer extra_tid = &elem2->heaptids[--elem2->heaptidsLength];
-+					if (sc2->distance < so->previousDistance)
++					else
 +					{
-+						j--;
-+						continue;
++						ItemPointer extra_tid = &elem2->heaptids[--elem2->heaptidsLength];
++						if (sc2->distance < so->previousDistance)
++						{
++							j--;
++							continue;
++						}
++						so->previousDistance = sc2->distance;
++
++						Datum vector_datum = HnswGetValue(base, elem2);
++						Vector* vec = DatumGetVector(vector_datum);
++
++						result_slot[so->prepared_neighbors].tid = *extra_tid;
++						result_slot[so->prepared_neighbors].distance = (float)sc2->distance;
++						result_slot[so->prepared_neighbors].vector_id = akerDefaultHash(
++							(char*)vec->x,
++							VARSIZE_ANY_EXHDR(vec) - 4);
++						so->prepared_neighbors++;
 +					}
-+					so->previousDistance = sc2->distance;
-+
-+					Datum vector_datum = HnswGetValue(base, elem2);
-+					Vector* vec = DatumGetVector(vector_datum);
-+
-+					result_slot[so->prepared_neighbors].tid = *extra_tid;
-+					result_slot[so->prepared_neighbors].distance = (float)sc2->distance;
-+					result_slot[so->prepared_neighbors].vector_id = akerDefaultHash(
-+						(char*)vec->x,
-+						VARSIZE_ANY_EXHDR(vec) - 4);
-+					so->prepared_neighbors++;
 +				}
 +
 +				char** vector_ref_list =
@@ -926,8 +922,7 @@ index 955998a..752a5f9 100644
 +					akerDestroyCacheEntry(cache_entry);
 +			}
 +		}
- 
--		scan->xs_heaptid = *heaptid;
++
 +		scan->xs_heaptid = heaptid_copy;
  		scan->xs_recheck = false;
  		scan->xs_recheckorderby = false;
@@ -936,7 +931,7 @@ index 955998a..752a5f9 100644
  		return true;
  	}
  
-@@ -323,6 +670,36 @@ hnswendscan(IndexScanDesc scan)
+@@ -323,6 +664,36 @@ hnswendscan(IndexScanDesc scan)
  {
  	HnswScanOpaque so = (HnswScanOpaque) scan->opaque;
  
