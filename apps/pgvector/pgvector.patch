@@ -1,5 +1,5 @@
 diff --git a/Makefile b/Makefile
-index 7a4b88c..84a4728 100644
+index 7a4b88c..3b10d8f 100644
 --- a/Makefile
 +++ b/Makefile
 @@ -4,8 +4,18 @@ EXTVERSION = 0.8.0
@@ -24,7 +24,7 @@ index 7a4b88c..84a4728 100644
  TESTS = $(wildcard test/sql/*.sql)
  REGRESS = $(patsubst test/sql/%.sql,%,$(TESTS))
 diff --git a/sql/vector.sql b/sql/vector.sql
-index 7fc3671..0040ccc 100644
+index 7fc3671..62b703d 100644
 --- a/sql/vector.sql
 +++ b/sql/vector.sql
 @@ -20,6 +20,14 @@ CREATE FUNCTION vector_recv(internal, oid, integer) RETURNS vector
@@ -44,7 +44,7 @@ index 7fc3671..0040ccc 100644
  	OUTPUT    = vector_out,
 diff --git a/src/ak_pgvector.c b/src/ak_pgvector.c
 new file mode 100644
-index 0000000..64eaff6
+index 0000000..df22db6
 --- /dev/null
 +++ b/src/ak_pgvector.c
 @@ -0,0 +1,211 @@
@@ -261,7 +261,7 @@ index 0000000..64eaff6
 +}
 diff --git a/src/ak_pgvector.h b/src/ak_pgvector.h
 new file mode 100644
-index 0000000..60e0cc3
+index 0000000..3fe42d3
 --- /dev/null
 +++ b/src/ak_pgvector.h
 @@ -0,0 +1,88 @@
@@ -354,7 +354,7 @@ index 0000000..60e0cc3
 +
 +#endif /* PGVECTOR_AK_PGVECTOR_H */
 diff --git a/src/hnsw.h b/src/hnsw.h
-index 1fb0c24..6849841 100644
+index 1fb0c24..1e46977 100644
 --- a/src/hnsw.h
 +++ b/src/hnsw.h
 @@ -3,6 +3,9 @@
@@ -394,7 +394,7 @@ index 1fb0c24..6849841 100644
  
  typedef HnswScanOpaqueData * HnswScanOpaque;
 diff --git a/src/hnswinsert.c b/src/hnswinsert.c
-index a5fac4e..b4ffa00 100644
+index a5fac4e..9b5f461 100644
 --- a/src/hnswinsert.c
 +++ b/src/hnswinsert.c
 @@ -1,6 +1,7 @@
@@ -474,7 +474,7 @@ index a5fac4e..b4ffa00 100644
  
  /*
 diff --git a/src/hnswscan.c b/src/hnswscan.c
-index 955998a..6d6d70b 100644
+index 955998a..752a5f9 100644
 --- a/src/hnswscan.c
 +++ b/src/hnswscan.c
 @@ -1,13 +1,18 @@
@@ -684,16 +684,16 @@ index 955998a..6d6d70b 100644
 +
 +		if (!so->is_cached)
 +		{
- 			/*
- 			 * Get a shared lock. This allows vacuum to ensure no in-flight scans
- 			 * before marking tuples as deleted.
- 			 */
- 			LockPage(scan->indexRelation, HNSW_SCAN_LOCK, ShareLock);
+ 		/*
+ 		 * Get a shared lock. This allows vacuum to ensure no in-flight scans
+ 		 * before marking tuples as deleted.
+ 		 */
+ 		LockPage(scan->indexRelation, HNSW_SCAN_LOCK, ShareLock);
 -
- 			so->w = GetScanItems(scan, value);
+ 		so->w = GetScanItems(scan, value);
 -
 -		/* Release shared lock */
- 			UnlockPage(scan->indexRelation, HNSW_SCAN_LOCK, ShareLock);
+ 		UnlockPage(scan->indexRelation, HNSW_SCAN_LOCK, ShareLock);
  
 +			if (ak_cache != NULL)
 +			{
@@ -714,7 +714,7 @@ index 955998a..6d6d70b 100644
  		so->first = false;
  
  #if defined(HNSW_MEMORY)
-@@ -224,6 +386,36 @@ hnswgettuple(IndexScanDesc scan, ScanDirection dir)
+@@ -224,12 +386,50 @@ hnswgettuple(IndexScanDesc scan, ScanDirection dir)
  #endif
  	}
  
@@ -751,7 +751,32 @@ index 955998a..6d6d70b 100644
  	for (;;)
  	{
  		char	   *base = NULL;
-@@ -303,11 +495,157 @@ hnswgettuple(IndexScanDesc scan, ScanDirection dir)
+ 		HnswSearchCandidate *sc;
+ 		HnswElement element;
+-		ItemPointer heaptid;
++		/*
++		 * IMPORTANT: copy the ItemPointerData by value.
++		 *
++		 * The miss-path cache bookkeeping (top_delta extras) may pop/free
++		 * the current element/search-candidate from so->w when the last
++		 * heaptid is consumed. Keeping only a pointer into element->heaptids
++		 * would become a use-after-free and can yield corrupted TIDs.
++		 */
++		ItemPointerData heaptid_copy;
+ 
+ 		if (list_length(so->w) == 0)
+ 		{
+@@ -293,7 +493,8 @@ hnswgettuple(IndexScanDesc scan, ScanDirection dir)
+ 			continue;
+ 		}
+ 
+-		heaptid = &element->heaptids[--element->heaptidsLength];
++		heaptid_copy = element->heaptids[--element->heaptidsLength];
++		ItemPointer heaptid = &heaptid_copy;
+ 
+ 		if (hnsw_iterative_scan == HNSW_ITERATIVE_SCAN_STRICT)
+ 		{
+@@ -303,11 +504,157 @@ hnswgettuple(IndexScanDesc scan, ScanDirection dir)
  			so->previousDistance = sc->distance;
  		}
  
@@ -902,7 +927,8 @@ index 955998a..6d6d70b 100644
 +			}
 +		}
  
- 		scan->xs_heaptid = *heaptid;
+-		scan->xs_heaptid = *heaptid;
++		scan->xs_heaptid = heaptid_copy;
  		scan->xs_recheck = false;
  		scan->xs_recheckorderby = false;
 +
@@ -910,7 +936,7 @@ index 955998a..6d6d70b 100644
  		return true;
  	}
  
-@@ -323,6 +661,36 @@ hnswendscan(IndexScanDesc scan)
+@@ -323,6 +670,36 @@ hnswendscan(IndexScanDesc scan)
  {
  	HnswScanOpaque so = (HnswScanOpaque) scan->opaque;
  
@@ -948,7 +974,7 @@ index 955998a..6d6d70b 100644
  
  	pfree(so);
 diff --git a/src/ivfflat.h b/src/ivfflat.h
-index c296b66..e319b3d 100644
+index c296b66..6289aec 100644
 --- a/src/ivfflat.h
 +++ b/src/ivfflat.h
 @@ -3,6 +3,9 @@
@@ -988,7 +1014,7 @@ index c296b66..e319b3d 100644
  	Tuplesortstate *sortstate;
  	TupleDesc	tupdesc;
 diff --git a/src/ivfinsert.c b/src/ivfinsert.c
-index 014c9be..01f43c2 100644
+index 014c9be..0ba5348 100644
 --- a/src/ivfinsert.c
 +++ b/src/ivfinsert.c
 @@ -2,8 +2,13 @@
@@ -1064,7 +1090,7 @@ index 014c9be..01f43c2 100644
  
  /*
 diff --git a/src/ivfscan.c b/src/ivfscan.c
-index 6cc5d2e..45520bb 100644
+index 6cc5d2e..0faade8 100644
 --- a/src/ivfscan.c
 +++ b/src/ivfscan.c
 @@ -9,9 +9,13 @@
@@ -1314,16 +1340,16 @@ index 6cc5d2e..45520bb 100644
 +
 +		if (!so->is_cached)
 +		{
- 			/* Count index scan for stats */
- 			pgstat_count_index_scan(scan->indexRelation);
+ 		/* Count index scan for stats */
+ 		pgstat_count_index_scan(scan->indexRelation);
  
 @@ -368,9 +564,31 @@ ivfflatgettuple(IndexScanDesc scan, ScanDirection dir)
- 			value = GetScanValue(scan);
- 			IvfflatBench("GetScanLists", GetScanLists(scan, value));
- 			IvfflatBench("GetScanItems", GetScanItems(scan, value));
+ 		value = GetScanValue(scan);
+ 		IvfflatBench("GetScanLists", GetScanLists(scan, value));
+ 		IvfflatBench("GetScanItems", GetScanItems(scan, value));
 -		so->first = false;
- 			so->value = value;
- 		}
+ 		so->value = value;
+ 	}
 +	}
 +
 +	/*
@@ -1507,7 +1533,7 @@ index 6cc5d2e..45520bb 100644
  	tuplesort_end(so->sortstate);
  
 diff --git a/src/vector.c b/src/vector.c
-index a5b2aac..82efe36 100644
+index a5b2aac..5f25a77 100644
 --- a/src/vector.c
 +++ b/src/vector.c
 @@ -22,6 +22,9 @@

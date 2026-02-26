@@ -64,22 +64,6 @@ This builds:
 - `aker_pgvector_potluck:latest`
 - `aker_pgvector_proximity:latest`
 
-### Debug base image (Option B)
-
-For iterative debugging (edit local code -> rebuild inside container -> run), build the debug base image **once** on top of the vanilla image:
-
-```bash
-# From project root:
-./docker/scripts/build_images.sh
-./docker/scripts/build_debug_base_image.sh
-```
-
-This adds:
-
-- `aker_pgvector_debug_base:latest`
-
-The debug base image keeps PostgreSQL + upstream pgvector intact, but includes build dependencies and FAISS so the runtime rebuild step is fast.
-
 Notes:
 
 - These images compile PostgreSQL 16.2 from the official source tarball and install pgvector v0.8.0.
@@ -197,39 +181,6 @@ To inspect leftover containers:
 ```bash
 docker ps -a | grep akerbench
 ```
-
----
-
-## Debug run: search-workload (rebuild Aker + pgvector from local sources)
-
-`ak_bench_run_search_debug.sh` is a debug variant of `ak_bench_run_search_workload.sh`.
-
-Before starting PostgreSQL, it rebuilds inside the container:
-
-- Aker from a baseline checkout (`/opt/src/aker`) **overwritten with local** `inc/`, `src/`, and (if present) `test/`
-- pgvector from a local clone at `apps/pgvector/pgvector` (you own this working tree)
-
-Example:
-
-```bash
-./ak_bench_run_search_debug.sh \
-  --aker-mode standard \
-  --config configs/spacev-1m-small-test.ini \
-  --output-dir output \
-  --aker-build-type Debug \
-  --aker-config configs/aker-standard-bootstrap.ini
-```
-
-Optional flags:
-
-- `--aker-mode standard|potluck|proximity` (default: `standard`)
-- `--aker-build-type Release|Debug|RelWithDebInfo` (default: `Release`)
-- `--docker-image <tag>` (default: `aker_pgvector_debug_base:latest`)
-
-Notes:
-
-- This script forces `docker.remove_container_on_exit=1` and recreates the container for each run.
-- The local pgvector repository **must exist** at `apps/pgvector/pgvector`.
 
 ---
 
@@ -368,13 +319,6 @@ export AK_BENCH_DOCKER_IMAGE=aker_pgvector_standard:latest
   --aker-config ../bootstrap/aker-standard.json
 ```
 
-### 5) End-to-end driver
-
-```bash
-export AK_BENCH_DOCKER_IMAGE=aker_pgvector_vanilla:latest
-./ak_bench_end_to_end_pgvector.sh --config configs/spacev-1m-small-test.ini --workload search --runs 3 --output-dir output
-```
-
 ---
 
 ## Outputs
@@ -402,8 +346,6 @@ Typical run outputs:
   - restore snapshot + drop cache + start + run search + wait + stop + collect traces + stop container
 - `ak_bench_run_stress_workload.sh`
   - restore snapshot + run insert/search stress + invalidation + wait + stop + collect traces + stop container
-- `ak_bench_end_to_end_pgvector.sh`
-  - wrapper that repeats the above pipelines
 - `ak_bench_pg_safeguard.sh`
   - INI parsing, Docker container lifecycle, pg_ctl start/stop (container), NUMA pin, cache drop, snapshot restore, trace collection
 
