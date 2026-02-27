@@ -474,7 +474,7 @@ index a5fac4e..9b5f461 100644
  
  /*
 diff --git a/src/hnswscan.c b/src/hnswscan.c
-index 955998a..c36736d 100644
+index 955998a..c2dc52a 100644
 --- a/src/hnswscan.c
 +++ b/src/hnswscan.c
 @@ -1,13 +1,18 @@
@@ -765,7 +765,7 @@ index 955998a..c36736d 100644
  		if (hnsw_iterative_scan == HNSW_ITERATIVE_SCAN_STRICT)
  		{
  			if (sc->distance < so->previousDistance)
-@@ -303,11 +494,152 @@ hnswgettuple(IndexScanDesc scan, ScanDirection dir)
+@@ -303,11 +494,148 @@ hnswgettuple(IndexScanDesc scan, ScanDirection dir)
  			so->previousDistance = sc->distance;
  		}
  
@@ -885,18 +885,14 @@ index 955998a..c36736d 100644
 +
 +				char** vector_ref_list =
 +					(char**)MemoryContextAlloc(so->tmpCtx, sizeof(char*) * (size_t)so->prepared_neighbors);
-+				const size_t payload_bytes = ak_cache->parameter.vector_format.vector_in_bytes;
++				const size_t payload_bytes = sizeof(struct AkResult);
 +
 +				for (int i = 0; i < so->prepared_neighbors; i++)
 +				{
-+					char* payload = (char*)MemoryContextAlloc(so->tmpCtx, payload_bytes);
-+					memset(payload, 0, payload_bytes);
-+					memcpy(payload, &result_slot[i], sizeof(struct AkResult));
-+
 +					vector_ref_list[i] = akerCreateVectorSlot(
 +						result_slot[i].vector_id,
 +						payload_bytes,
-+						payload,
++						&(result_slot[i]),
 +						0,
 +						0,
 +						result_slot[i].distance);
@@ -922,7 +918,7 @@ index 955998a..c36736d 100644
  		return true;
  	}
  
-@@ -323,6 +655,36 @@ hnswendscan(IndexScanDesc scan)
+@@ -323,6 +651,36 @@ hnswendscan(IndexScanDesc scan)
  {
  	HnswScanOpaque so = (HnswScanOpaque) scan->opaque;
  
