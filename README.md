@@ -380,3 +380,7 @@ Typical files include:
 - `aker_trace_hit_ratio_history.csv`
 - `aker_trace_approx_filter_history.csv`
 
+## Note
+
+- The codebase is being continuously reorganized and refined.
+- The evaluation results reported in the paper were obtained using [9f0c6c2e](https://github.com/sjoon-oh/Aker/tree/9f0c6c2e91a8c6dc199a069f349f2a2c7fb01a78) commit.
